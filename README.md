@@ -19,6 +19,21 @@ The goal of this repository is to centralize all design-related artifacts for th
 This repository is intended to evolve alongside the robot design.
 
 ---
+## Installation
+
+
+Requirements
+
+The required Python environment is described in environment.lock.
+
+In addition, the following dependencies are required:
+
+A fork of Crocoddyl: https://github.com/LudovicDeMatteis/crocoddyl/tree/topic/contact-6D-closed-loop
+
+A fork of Sobec : wip
+
+meshcat (for visualization)
+---
 
 ## Repository structure
 
@@ -40,3 +55,4 @@ This repository is intended to evolve alongside the robot design.
 │   └── figures/
 │
 └── README.md
+
