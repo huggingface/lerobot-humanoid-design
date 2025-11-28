@@ -66,8 +66,8 @@ meshcat (for visualization)
 │   │   
 │
 ├── docs/
-│   ├── humanoid_design_notes.pdf
-│   └── figures/
+│   └── lerobot_humanoid_design_notes.pdf
+│   
 │
 └── README.md
 
