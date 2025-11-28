@@ -19,6 +19,19 @@ The goal of this repository is to centralize all design-related artifacts for th
 This repository is intended to evolve alongside the robot design.
 
 ---
+## Roadmap (high level)
+
+The humanoid design follows an iterative, co-design-driven roadmap:
+
+- **Weeks 1–2**: Baseline humanoid modeling (URDF v0), first hip co-design
+  experiments, and actuator/middleware validation.
+- **Weeks 2–5**: Development of a first full CAD model 
+  and actuation assumptions.
+- **Weeks 6–9**: Assembly and validation of a first robotic leg prototype.
+- **Medium term**: Integration into a first full humanoid prototype (v0).
+- **Long term**: Iterative redesign, more design optimization, public releases.
+---
+
 ## Installation
 
 
