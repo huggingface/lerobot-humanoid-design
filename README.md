@@ -33,6 +33,8 @@ A fork of Crocoddyl: https://github.com/LudovicDeMatteis/crocoddyl/tree/topic/co
 A fork of Sobec : wip
 
 meshcat (for visualization)
+
+
 ---
 
 ## Repository structure
