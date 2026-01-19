@@ -1,0 +1,13 @@
+{
+    "configuration": "default",
+    "documentId": "fb645318a27646d1d8840be6",
+    "documentMicroversion": "c3d1803895978a773c83ef6d",
+    "elementId": "f021720dca71e00e955fec85",
+    "fullConfiguration": "default",
+    "id": "Mq1Y23Bw/TNYMuwtI",
+    "isStandardContent": false,
+    "name": "actuation_ankle <1>",
+    "partId": "RPBD",
+    "suppressed": false,
+    "type": "Part"
+}
