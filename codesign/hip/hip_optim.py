@@ -112,6 +112,21 @@ class V0Loader():
         q0 = closedLoopMountProximal(model,data,nconstraint_model[:],ncdata[:])
 
 
+
+
+        # import meshcat
+        # from pinocchio.visualize import MeshcatVisualizer
+        # viz = MeshcatVisualizer(model, self.collision_model, self.visual_model)
+        # viz.viewer = meshcat.Visualizer(zmq_url="tcp://127.0.0.1:6000")
+        # viz.clean()
+        # viz.loadViewerModel(rootNodeName="universe")
+        # viz.display(q0)
+
+
+
+
+
+
         model.referenceConfigurations["half_sitting"] = q0
 
         print([f.name for f in model.frames])
@@ -149,7 +164,7 @@ class EvaluateRobot():
         problem = ddp.problem
         x0s, u0s = sobec.wwt.buildInitialGuess(ddp.problem, walkParams)
         # ddp.setCallbacks([croc.CallbackVerbose(), croc.CallbackLogger()])
-        ddp.solve(init_xs=x0s, init_us=u0s, maxiter=800, init_reg=1e-6, is_feasible=False)
+        ddp.solve(init_xs=x0s, init_us=u0s, maxiter=100, init_reg=1e-6, is_feasible=False)
 
         sol = sobec.wwt.Solution(robot, ddp)
         vs = sol.xs[:,robot.model.nq:]
@@ -191,7 +206,7 @@ class EvaluateRobot():
         problem = ddp.problem
         x0s, u0s = sobec.wwt.buildInitialGuess(ddp.problem, walkParams)
         # ddp.setCallbacks([croc.CallbackVerbose(), croc.CallbackLogger()])
-        ddp.solve(init_xs=x0s, init_us=u0s, maxiter=800, init_reg=1e-6, is_feasible=False)
+        ddp.solve(init_xs=x0s, init_us=u0s, maxiter=100, init_reg=1e-6, is_feasible=False)
 
         sol = sobec.wwt.Solution(robot, ddp)
         vs = sol.xs[:,robot.model.nq:]
@@ -307,12 +322,15 @@ if __name__ == "__main__":
          -25.11051615, -76.66889449])
 
 
-    Lvalue =[]
-    Lpoint=[0,1,50,100,150,200]
-    for dx in [dx1,dx2,dx3,dx4,dx6,dx7]:
-        Lvalue.append(evaluate.evaluate(dx))
 
+    dx8 = np.array([ -8.10875616,  -0.8085541 , -56.51608165,  14.00093572,
+         -11.02247696, -84.22985613])
     
+    dx9 =np.array([ -7.07608636,  -1.1400171 , -57.48542757,  13.71672827,
+         -11.36045942, -83.37281477])
+
+    dx10 = np.array([ -8.08829439,  -0.20494419, -56.72015355,  18.32296692,
+         -23.56834157, -80.45340603])
     evaluate = EvaluateRobot()
     stop
     Lvalue=[]
@@ -322,10 +340,36 @@ if __name__ == "__main__":
 
 
 
+    Lvalue =[]
+    Lpoint=[0,1,50,100,150,200]
+    for dx in [dx1,dx2,dx3,dx4,dx6,dx7]:
+        Lvalue.append(evaluate.evaluate(dx))
 
     stop
+
+
     from cmaes import CMA
 
+
+    dx= np.array([ -8.41673617,  -0.67836718, -56.14311573,  17.5914297 ,
+         -24.48712805, -80.15278452,0.])
+
+    Lvalue=[]
+    Lplace=[0.03,0.02,0.01,0,-0.01,-0.02,-0.03,-0.04]
+    for place in Lplace:
+        dx[-1]=place
+        value =evaluate.evaluate(dx)
+        Lvalue.append(copy.copy(value))
+        print(f"place={place} value={value}")
+    plt.figure()
+    plt.plot(Lplace,Lvalue)
+    plt.xlabel("Ankle position")            
+    plt.ylabel("Cost function")
+    plt.show()
+
+
+
+    from cmaes import CMA
     optimizer = CMA(mean=np.float64(dx), sigma=1.3)
     for generation in range(50):
         solutions = []
@@ -335,3 +379,43 @@ if __name__ == "__main__":
             solutions.append((x, np.float64(value)))
             print(f"#{generation} {value} (x1={x[0]}, x2 = {x[1]})")
         optimizer.tell(solutions)
+
+
+
+import numpy as np
+
+def rotation_matrix_to_euler_xyz(R):
+    """
+    Convert a 3x3 rotation matrix to Euler angles (XYZ order).
+
+    Convention:
+        - Right-handed coordinate system
+        - Active rotations on column vectors
+        - Overall rotation: R = Rz(z) @ Ry(y) @ Rx(x)
+        - Returns angles (x, y, z) in radians
+
+    Parameters
+    ----------
+    R : array_like, shape (3, 3)
+        Rotation matrix.
+
+    Returns
+    -------
+    x, y, z : float
+        Euler angles around X, Y, Z axes (in radians).
+    """
+    R = np.asarray(R, dtype=float)
+    if R.shape != (3, 3):
+        raise ValueError("R must be a 3x3 matrix")
+
+    # Protect against numerical issues:
+    # For this convention, sin(y) = -R[2,0]
+    sy = -R[2, 0]
+    sy = np.clip(sy, -1.0, 1.0)
+
+    # Compute angles
+    y = np.arcsin(sy)                  # rotation about Y
+    x = np.arctan2(R[2, 1], R[2, 2])   # rotation about X
+    z = np.arctan2(R[1, 0], R[0, 0])   # rotation about Z
+
+    return x, y, z
