@@ -3,7 +3,7 @@ import crocoddyl as croc
 import numpy as np
 import matplotlib.pylab as plt  # noqa: F401
 from numpy.linalg import norm, pinv, inv, svd, eig  # noqa: F401
-from urdf.humanoids_loader import loadbasic,loadTunedHipx
+from urdf.humanoids_loader import loadbasic,loadTunedHipx,loadBipedalPlateform
 from experiments.V0_walk_param import WalkV0Params
 from experiments.V0_sidewalk_param import SideWalkV0Params
 # Local imports
@@ -20,7 +20,7 @@ import os
 walkParams = WalkV0Params()
 
 cwd=os.getcwd()
-robot = loadTunedHipx(45)
+robot = loadBipedalPlateform()
 
 
 assert len(walkParams.stateImportance) == robot.model.nv * 2
