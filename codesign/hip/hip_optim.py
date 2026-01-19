@@ -36,6 +36,29 @@ class V0Loader():
 
     def tune(self,dx):
         model = tuneModel(copy.copy(self.model),dx)
+
+        alpha = 0
+        rotate = pin.utils.rotate('y',np.deg2rad(alpha))
+        SE3=pin.SE3.Identity()
+        SE3.rotation=rotate
+        ankle_left_placement=model.jointPlacements[6]
+        model.jointPlacements[6]=ankle_left_placement*SE3
+
+        rotate = pin.utils.rotate('y',np.deg2rad(-alpha))
+        SE3=pin.SE3.Identity()
+        SE3.rotation=rotate
+        ankle_right_placement=model.jointPlacements[12]
+        model.jointPlacements[12]=ankle_right_placement*SE3       
+
+
+        place = 0.02   # correction of ankle position to have a perfect Ujoint 
+        SE3=pin.SE3.Identity()
+        SE3.translation[0]=place
+        model.jointPlacements[13]=model.jointPlacements[13] * SE3
+        SE3.translation[0]=place
+        model.jointPlacements[7]=model.jointPlacements[7] * SE3
+
+
         data=model.createData()
         entraxe=-0.105
         foot_id=[model.getFrameId(f) for f in ["foot_right","foot_left"]]
