@@ -1,0 +1,22 @@
+closed_loop:
+  [
+  ]
+type: []
+name_mot:
+  [
+    "hipz",
+    "hipy",
+    "hipx",
+    "knee",
+    "anklex",
+    "ankley",
+  ]
+# name_mot: ['left_hip_x', 'left_hip_y', 'left_hip_z', 'left_free_knee', 'left_free_ankle_x', 'left_free_ankle_y','right_hip_x', 'right_hip_y', 'right_hip_z', 'right_free_knee', 'right_free_ankle_x', 'right_free_ankle_y',]
+
+joint_name:
+  [
+  ]
+joint_type:
+  [
+  ]
+

@@ -15,6 +15,170 @@ CWD = os.path.dirname(os.path.abspath(__file__))
 
 
 
+
+def loadUpperBody():
+    model,constraint_models,actuation_model,visual_model,colision_model = completeRobotLoader(CWD + '/upper_body/urdf', freeflyer=True)
+
+    for c in constraint_models:
+        c.corrector.Kp[:]=np.ones(6)*10
+        c.corrector.Kd[:]=np.ones(6)*2
+    model.armature[actuation_model.mot_ids_v]=[3400*8*1e-7,1477*18*1e-7,1477*18*1e-7,1477*6*1e-7]
+
+
+
+    data=model.createData()
+    cdata=[c.createData() for c in constraint_models]
+
+    Lcontact_frame =[]
+    
+    torso_name="torso"
+    torso_placement=pin.SE3.Identity()
+    torso_placement.translation[2]=161*1e-3
+    torso_placement.translation[0]=0.0
+    id_torso=model.getFrameId(torso_name)
+    Lcontact_frame.append([model.frames[id_torso],torso_placement])
+
+    nconstraint_model=[]
+    for f1,placement in Lcontact_frame[:]:
+        nconstraint_model.append(pin.RigidConstraintModel(pin.ContactType.CONTACT_6D,model,f1.parentJoint,f1.placement,0,placement,pin.ReferenceFrame.LOCAL))
+
+    ncdata=[c.createData() for c in nconstraint_model]
+
+
+    q0  = closedLoopMountProximal(model,data,constraint_models+nconstraint_model[:],cdata+ncdata[:])
+    # q0[8]=1
+
+    pin.forwardKinematics(model, data, q0, np.zeros(model.nv))
+    pin.framesForwardKinematics(model, data, q0)    
+
+    import meshcat
+    from pinocchio.visualize import MeshcatVisualizer
+    viz = MeshcatVisualizer(model, visual_model, visual_model)
+    viz.viewer = meshcat.Visualizer(zmq_url="tcp://127.0.0.1:6000")
+    viz.clean()
+    viz.loadViewerModel(rootNodeName="universe")
+    viz.display(q0)
+
+
+
+
+    model.referenceConfigurations["half_sitting"] = q0
+
+
+    robot = sobec.wwt.RobotWrapper(model, contactKey="48646", closed_loop=True)
+    robot.collision_model = visual_model
+    robot.visual_model = visual_model
+    robot.actuationModel = actuation_model
+    robot.loop_constraints_models = constraint_models
+
+    return(robot)
+
+
+
+
+
+def tuneArmModel(omodel,dx):
+
+    model=omodel.copy()
+    data=model.createData()
+    pin.forwardKinematics(model, data, pin.neutral(model), np.zeros(model.nv))
+    pin.framesForwardKinematics(model, data, pin.neutral(model))
+    shoulder_invariant_center = pin.SE3.Identity()
+
+    shoulder_invariant_center.translation[:] = data.oMf[6].translation
+
+    oMc=shoulder_invariant_center
+
+    #shoulder z rotation
+
+    cMz = pin.SE3.Identity()
+    cMz.translation[2] = 0.043
+    cMz.rotation=pin.utils.rotate("z",np.deg2rad(-90))
+
+
+    Rx = pin.utils.rotate("x",np.deg2rad(dx[0]))
+    R1 = pin.SE3.Identity()
+    R1.rotation = Rx
+    Ry = pin.utils.rotate("y",np.deg2rad(dx[1]))
+    R2 = pin.SE3.Identity()
+    R2.rotation = Ry
+
+    n_cMz = R1 * R2 * cMz
+
+    oMjp = data.oMi[model.parents[2]]
+
+
+    jpMz= oMjp.inverse() * oMc* n_cMz 
+
+    model.jointPlacements[2] = jpMz
+
+
+
+    #shoulder y rotation
+
+
+
+
+    cMy = pin.SE3.Identity()
+    cMy.translation[0] = -0.03
+    cMy.rotation=pin.utils.rotate("y",np.deg2rad(90))
+
+    Rx = pin.utils.rotate("x",np.deg2rad(dx[2]))
+    R1 = pin.SE3.Identity()
+    R1.rotation = Rx
+    Rz = pin.utils.rotate("y",np.deg2rad(dx[3]))
+    R2 = pin.SE3.Identity()
+    R2.rotation = Ry
+
+    n_cMy = R1 * R2 * cMy
+
+    oMjp = data.oMi[model.parents[3]]
+
+    jpMy= oMjp.inverse() * oMc* n_cMy
+
+    model.jointPlacements[3] = jpMy
+
+
+
+
+    #shoulder x rotation
+
+    cMx = pin.SE3.Identity()
+    cMx.translation[:] = [0.0075,0,-0.105]
+    cMx.rotation=pin.utils.rotate("z",np.deg2rad(-90))
+
+    Rx = pin.utils.rotate("x",np.deg2rad(dx[4]))
+    R1 = pin.SE3.Identity()
+    R1.rotation = Rx
+    Rz = pin.utils.rotate("y",np.deg2rad(dx[5]))
+    R2 = pin.SE3.Identity()
+    R2.rotation = Rz
+
+    n_cMx = R1 * R2 * cMx
+
+    oMjp = data.oMi[model.parents[4]]
+
+    jpMx= oMjp.inverse() * oMc* n_cMx
+
+    model.jointPlacements[4] = jpMx
+
+    #elbow roation (easy)
+    if len(dx)==8:
+        Rx=pin.utils.rotate("x",np.deg2rad(dx[6]))
+        Ry=pin.utils.rotate("y",np.deg2rad(dx[7]))
+        SE3Rx=pin.SE3.Identity()
+        SE3Rx.rotation=Rx
+        SE3Ry=pin.SE3.Identity()
+        SE3Ry.rotation=Ry
+        model.jointPlacements[5]=model.jointPlacements[5]* SE3Rx * SE3Ry
+
+
+    return(model)
+
+
+
+
+
 def loadbasic():
     model,constraint_models,actuation_model,visual_model,colision_model = completeRobotLoader(CWD + '/humanoid_v0/urdf', freeflyer=True)
 
@@ -108,6 +272,117 @@ def loadbasic():
 
 
     return(robot)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def loadBipedalPlateform():
+    model,constraint_models,actuation_model,visual_model,colision_model = completeRobotLoader(CWD + '/bipedal_plateform/urdf', freeflyer=True)
+
+    for c in constraint_models:
+        c.corrector.Kp[:]=np.ones(6)*10
+        c.corrector.Kd[:]=np.ones(6)*2
+    model.armature[actuation_model.mot_ids_v]=[3400*8*1e-7,1477*18*1e-7,1477*18*1e-7,1477*6*1e-7,1477*6*1e-7,1477*18*1e-7]*2
+
+    data=model.createData()
+    cdata=[c.createData() for c in constraint_models]
+
+    
+    entraxe=-0.105
+    foot_id=[model.getFrameId(f) for f in ["foot_right","foot_left"]]
+    Lcontact_frame =[]
+    for fid in foot_id:
+        f=model.frames[fid]
+        if "right" in f.name:
+            placement=pin.SE3.Identity()
+            placement.translation[1]=entraxe
+            placement.rotation=pin.utils.rotate('z',np.deg2rad(0))
+            Lcontact_frame.append([f,placement.copy()])
+        else:
+            placement=pin.SE3.Identity()
+            placement.translation[1]=-entraxe
+            placement.rotation= pin.utils.rotate('z',np.deg2rad(0))
+            Lcontact_frame.append([f,placement.copy()])
+
+
+    base_height= 0.65
+    Lcontact_frame =[]
+    for fid in foot_id:
+        f=model.frames[fid]
+        if "left" in f.name:
+            placement=pin.SE3.Identity()
+            placement.translation[1]=-entraxe
+            placement.rotation=pin.utils.rotate('z',np.deg2rad(0))
+            Lcontact_frame.append([f,placement.copy()])
+        else:
+            placement=pin.SE3.Identity()
+            placement.translation[1]=entraxe
+            placement.rotation= pin.utils.rotate('z',np.deg2rad(0))
+            Lcontact_frame.append([f,placement.copy()])
+
+    
+    torso_name="torso"
+    torso_placement=pin.SE3.Identity()
+    torso_placement.translation[2]=base_height
+    torso_placement.translation[0]=0.0
+    id_torso=model.getFrameId(torso_name)
+    Lcontact_frame.append([model.frames[id_torso],torso_placement])
+
+    nconstraint_model=[]
+    for f1,placement in Lcontact_frame[:]:
+        nconstraint_model.append(pin.RigidConstraintModel(pin.ContactType.CONTACT_6D,model,f1.parentJoint,f1.placement,0,placement,pin.ReferenceFrame.LOCAL))
+
+    ncdata=[c.createData() for c in nconstraint_model]
+    
+
+    q0 = closedLoopMountProximal(model,data,constraint_models+nconstraint_model[:],cdata+ncdata[:])
+
+    import meshcat
+    from pinocchio.visualize import MeshcatVisualizer
+
+
+    viz = MeshcatVisualizer(model, visual_model, visual_model)
+    viz.viewer = meshcat.Visualizer(zmq_url="tcp://127.0.0.1:6000")
+    viz.clean()
+    viz.loadViewerModel(rootNodeName="universe")
+    q0 = closedLoopMountProximal(model,data,constraint_models+nconstraint_model[:],cdata+ncdata[:])
+    viz.display(q0)
+
+
+
+
+    model.referenceConfigurations["half_sitting"] = q0
+
+    print([f.name for f in model.frames])
+    idfoot=[model.getFrameId(n) for n in ["foot_left","foot_right"]]
+    for idf in idfoot:
+        model.frames[idf].name += "48646"
+
+
+
+    robot = sobec.wwt.RobotWrapper(model, contactKey="48646", closed_loop=True)
+    robot.collision_model = visual_model
+    robot.visual_model = visual_model
+    robot.actuationModel = actuation_model
+    robot.loop_constraints_models = constraint_models
+    assert len(robot.contactIds) == 2
+
+
+    return(robot)
+
+
+
 
 
 
@@ -389,6 +664,9 @@ def tuneModel(model,dx):
 
     return(model)
 
+
+
+
 def create_robot(dx):
     model,constraint_models,actuation_model,visual_model,collision_model = loadRobot()
     model=tuneModel(model,dx)
@@ -457,7 +735,6 @@ def create_robot(dx):
     viz.loadViewerModel(rootNodeName="universe")
     q0 = closedLoopMountProximal(model,data,nconstraint_model[:],ncdata[:])
     viz.display(q0)
-
 
 
 
