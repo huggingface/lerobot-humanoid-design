@@ -8,7 +8,7 @@ import can
 import numpy as np
 
 from leg_test.mit import MotorState, float_to_uint, uint_to_float
-from root_constant import MOTORS, CAN_CMD_CLEAR_FAULT
+from root_constant import MOTORS, CAN_CMD_CLEAR_FAULT, CAN_CMD_ENABLE, CAN_CMD_DISABLE, CAN_CMD_ZERO
 
 
 def _pack_state_frame(
@@ -69,9 +69,16 @@ class MockBus:
         is_cmd_ff = (len(data) == 8 and all(b == 0xFF for b in data[:7]))
         if is_cmd_ff:
             cmd = int(data[7])
-            # CLEAR_FAULT -> explicit zero state.
-            if cmd == int(CAN_CMD_CLEAR_FAULT):
-                st = MotorState(position_deg=0.0, velocity_deg_s=0.0, torque_nm=0.0, temp_mos_c=self._default_temp_c, stamp=time.time())
+            # Known command frames -> echo current state (or default if unknown).
+            if cmd in {int(CAN_CMD_CLEAR_FAULT), int(CAN_CMD_ENABLE), int(CAN_CMD_DISABLE), int(CAN_CMD_ZERO)}:
+                prev = self._state.get(motor_id, MotorState(temp_mos_c=self._default_temp_c))
+                st = MotorState(
+                    position_deg=float(prev.position_deg),
+                    velocity_deg_s=0.0,
+                    torque_nm=0.0,
+                    temp_mos_c=prev.temp_mos_c if prev.temp_mos_c > 0 else self._default_temp_c,
+                    stamp=time.time(),
+                )
                 self._state[motor_id] = st
                 self._enqueue_state(motor_id, st, pmax=pmax, vmax=vmax, tmax=tmax)
                 return

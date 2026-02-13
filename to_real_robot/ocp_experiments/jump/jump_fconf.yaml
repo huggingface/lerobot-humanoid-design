@@ -1,5 +1,6 @@
 robot:
   base_height: 0.58
+  torso_contact_z_offset: -0.10
 
 solver:
   name: FDDP
