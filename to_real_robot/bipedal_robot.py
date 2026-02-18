@@ -517,7 +517,11 @@ class BipedalRobotController:
                 f"Could not find URDF. Expected one of: {urdf_candidates[0]} or {urdf_candidates[1]}"
             )
 
-        robot_wrapper = RobotWrapper.BuildFromURDF(str(urdf_path), [str(MODEL_URDF_DIR)])
+        robot_wrapper = RobotWrapper.BuildFromURDF(
+            str(urdf_path),
+            [str(MODEL_URDF_DIR)],
+            pin.JointModelFreeFlyer(),
+        )
         viz = MeshcatVisualizer(
             robot_wrapper.model,
             robot_wrapper.collision_model,
