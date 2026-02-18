@@ -112,3 +112,39 @@ agent.spec.action_scale = 0.2
 agent.set_command_twist(0.0, 0.0, 0.0)
 
 agent.start()
+
+
+
+
+
+
+
+from bipedal_robot import BipedalRobotController
+from IMU_integration import IMU
+from mock_bus import MockBus
+
+imu = IMU(sensor="jy901", mock=False, port="/dev/ttyAMA0", baudrate=9600)
+robot = BipedalRobotController(control_hz=100.0, bus_can0=MockBus(), bus_can1=MockBus(),imu=imu)
+
+robot.attach_default_meshcat()   # optional
+
+for mid in range(1, 13):
+    robot.set_joint_limit(mid, -720.0, 720.0)
+robot.set_max_command_delta(1000.0)
+
+robot.start(mode="control", auto_enable=True)
+robot.request_state_once()      # ensure valid stamps
+
+robot._viz_hz = 20.0            # reduce lag a lot
+robot.set_action(left={"hipz": -0.06, "hipx": 3.55, "hipy": 0.04, "knee": -16.89, "ankle_pitch": 12.332, "ankle_roll": 0.09},right={"hipz": 0.0021, "hipx": -3.59, "hipy": -0.033, "knee": -17.34, "ankle_pitch": -12.43, "ankle_roll": 0.12},)
+
+from pathlib import Path
+from bipedal_robot import BipedalRobotController
+from ocp_follower import OCPFollower
+from ocp_controller_staged import load_ocp_npy, go_to_pose  # helpers already added
+
+traj = load_ocp_npy(Path("/home/lerobot/devel/real_robot_jump.npy"), dt_s=0.005)
+follower = OCPFollower(robot)
+follower.set_trajectory(traj)
+
+go_to_pose(robot, traj.q_deg[0], duration_s=2.0)
