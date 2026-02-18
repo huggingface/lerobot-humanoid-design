@@ -106,7 +106,7 @@ agent = RLAgent.from_files(
 agent.apply_model_gains_from_mjcf("RL_policy/robot.xml")
 
 # safety scaling (start small)
-agent.spec.action_scale = 0.2
+agent.spec.action_scale = 0.002
 
 # optional command
 agent.set_command_twist(0.0, 0.0, 0.0)
@@ -117,7 +117,7 @@ agent.start()
 
 
 
-
+### Mock Test thas should pass
 
 from bipedal_robot import BipedalRobotController
 from IMU_integration import IMU
@@ -148,3 +148,25 @@ follower = OCPFollower(robot)
 follower.set_trajectory(traj)
 
 go_to_pose(robot, traj.q_deg[0], duration_s=2.0)
+
+
+from RL_agent import RLAgent
+
+
+
+agent = RLAgent.from_files(
+    robot,
+    config_path="RL_policy/config.yaml",
+    policy_path="RL_policy/2026-02-03_10-07-41.onnx",
+)
+
+# optional: load gains from RL mjcf
+agent.apply_model_gains_from_mjcf("RL_policy/robot.xml")
+
+# safety scaling (start small)
+agent.spec.action_scale = 0.002
+
+# optional command
+agent.set_command_twist(0.0, 0.0, 0.0)
+
+agent.start()
