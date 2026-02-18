@@ -122,6 +122,7 @@ class BipedalRobotController:
         self._viz_hz = 60.0
         self._viz_data_lock = threading.Lock()
         self._viz_raw_latest: Optional[Dict[int, float]] = None
+        self._viz_orientation_latest: Optional[tuple[float, float, float, float]] = None
         self._limit_source = "raw"
         self._startup_wrap_checked = False
         self._auto_shift_limits_with_wrap = False
@@ -1218,8 +1219,15 @@ class BipedalRobotController:
             return
         with self._state_lock:
             snap = {mid: float(self.state[mid].position_deg) for mid in MOTOR_IDS}
+        with self._imu_lock:
+            quat_xyzw = (
+                None
+                if self._orientation_quaternion_xyzw is None
+                else tuple(self._orientation_quaternion_xyzw)
+            )
         with self._viz_data_lock:
             self._viz_raw_latest = snap
+            self._viz_orientation_latest = quat_xyzw
 
     def _viz_loop(self) -> None:
         period = 1.0 / max(1.0, float(self._viz_hz))
@@ -1229,9 +1237,34 @@ class BipedalRobotController:
                 continue
             with self._viz_data_lock:
                 raw = self._viz_raw_latest
+                quat_xyzw = self._viz_orientation_latest
             if raw is not None:
                 try:
-                    q = self.motor_state_to_joint_state(raw, output_radians=True, nq=int(self._model_nq))
+                    q_joints = self.motor_state_to_joint_state(raw, output_radians=True, nq=12)
+                    model_nq = int(self._model_nq)
+                    if model_nq <= 12:
+                        q = q_joints[:model_nq]
+                    else:
+                        if pin is not None:
+                            q = pin.neutral(self._viz.model).copy()
+                        else:
+                            q = np.zeros(model_nq, dtype=float)
+
+                        # Standard free-flyer layout: [x y z qx qy qz qw joints...]
+                        if model_nq >= 19:
+                            start = 7
+                        else:
+                            start = model_nq - 12
+                        q[start : start + 12] = q_joints[:12]
+
+                        if (
+                            quat_xyzw is not None
+                            and model_nq >= 7
+                        ):
+                            qx, qy, qz, qw = [float(v) for v in quat_xyzw]
+                            qnorm = float(np.linalg.norm([qx, qy, qz, qw]))
+                            if qnorm > 1e-9:
+                                q[3:7] = np.array([qx, qy, qz, qw], dtype=float) / qnorm
                     self._viz.display(q)
                 except Exception:
                     pass
