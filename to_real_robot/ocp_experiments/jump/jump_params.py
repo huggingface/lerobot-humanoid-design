@@ -20,21 +20,21 @@ class JumpRealRobotParams(ParamsBase):
 
     # Squat-first profile (no real flight), used to tune in-place motion.
     DT = 0.005
-    TStand = 30
-    TPush = 40
+    TStand = 1
+    TPush = 20
     Tstart = TStand + TPush
 
     # Keep a tiny "fly" duration to stay compatible with jump pipeline.
-    TFlyUp = 1
+    TFlyUp = 20
     TFlyDown = TFlyUp
     TFly = TFlyUp + TFlyDown
 
-    TLand = 40
-    Tend = 30
+    TLand = TPush
+    Tend = 1
 
     contactPattern = (
         [[1, 1]] * (TStand + TPush)
-        + [[1, 1]] * (TFlyUp + TFlyDown)
+        + [[0, 0]] * (TFlyUp + TFlyDown)
         + [[1, 1]] * (TLand + Tend)
     )
     Ttotal = len(contactPattern)
@@ -97,7 +97,7 @@ class JumpRealRobotParams(ParamsBase):
         )
         nv = len(basis_v_weights) + 2 * len(leg_v_weights)
         self.stateTerminalImportance = np.array(
-            [0, 0, 0, 0, 0, 0] + [1] * (nv - 6) + [1] * nv
+            [10, 10, 10, 10, 10, 10] + [10] * (nv - 6) + [1] * nv
         )
         # Stronger torque minimization on ankle joints.
         # Order follows robot.yaml motors:

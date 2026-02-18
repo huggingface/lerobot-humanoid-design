@@ -36,9 +36,9 @@ def load_ocp_npy(path: Path, *, dt_s: float) -> OCPTrajectory:
         raise RuntimeError(f"Unexpected trajectory dimensions: xs={xs.shape}, us={us.shape}")
 
     nq = xs.shape[1] - 18
-    q_act = _swap_hx_hy_order(np.asarray(xs[:, (nq - 12):nq], dtype=float))
-    v_act = _swap_hx_hy_order(np.asarray(xs[:, -12:], dtype=float))
-    tau = _swap_hx_hy_order(np.asarray(us[:, :12], dtype=float))
+    q_act = np.asarray(xs[:, 7:nq], dtype=float)
+    v_act = np.asarray(xs[:, 6:], dtype=float)
+    tau = np.asarray(us[:, :], dtype=float)
 
     q_deg = np.rad2deg(q_act)
     qd_deg_s = np.rad2deg(v_act)

@@ -10,8 +10,7 @@ import time
 
 import numpy as np
 
-from bipedal_robot import BipedalRobotController, MotorCommand
-from root_constant import ANKLE_COUPLING_CALIBRATION_LEFT, ANKLE_COUPLING_CALIBRATION_RIGHT, MOTOR_IDS
+from bipedal_robot import BipedalRobotController
 
 
 @dataclass
@@ -124,52 +123,12 @@ class OCPFollower:
         tau = np.array([np.interp(t_query, t, traj.tau_ff_nm[:, i]) for i in range(12)], dtype=float)
         return q, qd, tau
 
-    def _joint_vel_tau_to_motor_raw(self, qd_deg_s: np.ndarray, tau_nm: np.ndarray) -> tuple[Dict[int, float], Dict[int, float]]:
-        """
-        Map model joint-space (qd, tau) to motor raw-space.
-        Direct joints:
-          q_cal = sign * q_raw + offset  -> qd_raw = qd_cal / sign
-          power consistency -> tau_raw = tau_cal * sign
-        Coupled ankles:
-          pitch = sp*(a1-a2)/2, roll = sr*(a1+a2)/2
-          solve for (a1_dot, a2_dot), and tau_motor = J^T * tau_joint
-        """
-        qd_raw: Dict[int, float] = {}
-        tau_raw: Dict[int, float] = {}
-
-        # Direct joints map: model index -> motor id
-        direct = {
-            0: 1, 1: 2, 2: 3, 3: 4,
-            6: 7, 7: 8, 8: 9, 9: 10,
-        }
-        for qi, mid in direct.items():
-            s = float(self.robot.motor_sign[mid])
-            if abs(s) < 1e-9:
-                raise ValueError(f"Invalid motor sign for m{mid}: {s}")
-            qd_raw[mid] = float(qd_deg_s[qi] / s)
-            tau_raw[mid] = float(tau_nm[qi] * s)
-
-        # Left ankle (q indices 4,5 -> motors 5,6)
-        sp_l = float(ANKLE_COUPLING_CALIBRATION_LEFT["pitch"]["sign"])
-        sr_l = float(ANKLE_COUPLING_CALIBRATION_LEFT["roll"]["sign"])
-        u_l = float(qd_deg_s[4]) / sp_l
-        v_l = float(qd_deg_s[5]) / sr_l
-        qd_raw[5] = u_l + v_l
-        qd_raw[6] = v_l - u_l
-        tau_raw[5] = 0.5 * sp_l * float(tau_nm[4]) + 0.5 * sr_l * float(tau_nm[5])
-        tau_raw[6] = -0.5 * sp_l * float(tau_nm[4]) + 0.5 * sr_l * float(tau_nm[5])
-
-        # Right ankle (q indices 10,11 -> motors 11,12)
-        sp_r = float(ANKLE_COUPLING_CALIBRATION_RIGHT["pitch"]["sign"])
-        sr_r = float(ANKLE_COUPLING_CALIBRATION_RIGHT["roll"]["sign"])
-        u_r = float(qd_deg_s[10]) / sp_r
-        v_r = float(qd_deg_s[11]) / sr_r
-        qd_raw[11] = u_r + v_r
-        qd_raw[12] = v_r - u_r
-        tau_raw[11] = 0.5 * sp_r * float(tau_nm[10]) + 0.5 * sr_r * float(tau_nm[11])
-        tau_raw[12] = -0.5 * sp_r * float(tau_nm[10]) + 0.5 * sr_r * float(tau_nm[11])
-
-        return qd_raw, tau_raw
+    def _as_side_dicts(self, x: np.ndarray) -> tuple[Dict[str, float], Dict[str, float]]:
+        x = np.asarray(x, dtype=float).reshape(12)
+        keys = ("hipz", "hipx", "hipy", "knee", "ankle_pitch", "ankle_roll")
+        left = {k: float(x[i]) for i, k in enumerate(keys)}
+        right = {k: float(x[6 + i]) for i, k in enumerate(keys)}
+        return left, right
 
     def run(self, *, blocking: bool = True, t_offset_s: float = 0.0) -> None:
         """
@@ -191,22 +150,17 @@ class OCPFollower:
             if t_rel > float(traj.t_s[-1]):
                 break
             q_deg, qd_deg_s, tau_nm = self._interp_row(t_rel)
-
-            # Joint-space desired position -> raw motor desired position.
-            pos_raw = self.robot.joint_state_to_motor_state(q_deg, input_radians=False, output_space="raw")
-            vel_raw, tau_raw = self._joint_vel_tau_to_motor_raw(qd_deg_s, tau_nm)
-
-            # Update controller action buffer. Existing safety remains in MIT send path.
-            with self.robot._action_lock:
-                for mid in MOTOR_IDS:
-                    prev = self.robot.action[mid]
-                    self.robot.action[mid] = MotorCommand(
-                        position_deg=float(pos_raw[mid]),
-                        velocity_deg_s=float(vel_raw[mid]),
-                        torque_nm=float(tau_raw[mid]),
-                        kp=prev.kp,
-                        kd=prev.kd,
-                    )
+            left_pos, right_pos = self._as_side_dicts(q_deg)
+            left_vel, right_vel = self._as_side_dicts(qd_deg_s)
+            left_tau, right_tau = self._as_side_dicts(tau_nm)
+            self.robot.set_joint_action(
+                left=left_pos,
+                right=right_pos,
+                left_velocity_deg_s=left_vel,
+                right_velocity_deg_s=right_vel,
+                left_torque_nm=left_tau,
+                right_torque_nm=right_tau,
+            )
 
             time.sleep(period)
 
@@ -216,4 +170,3 @@ def run_from_csv(robot: BipedalRobotController, csv_path: Path) -> OCPFollower:
     follower.set_trajectory(load_ocp_csv(csv_path))
     follower.run()
     return follower
-

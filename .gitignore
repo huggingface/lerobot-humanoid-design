@@ -210,3 +210,16 @@ urdf/__pycache__/humanoids_loader.cpython-39.pyc
 codesign/hip/__pycache__/V0_walk_param.cpython-39.pyc
 
 codesign/hip/__pycache__/
+to_real_robot/bipedal_state_log*.csv
+to_real_robot/log_copies/
+
+# Robot logs (do not commit)
+to_real_robot/bipedal_state_log*.csv
+to_real_robot/log_copies/
+# Robot logs / data (do not commit)
+*bipedal_state_log*.csv
+to_real_robot/log_copies/
+logs/
+*.bag
+*.mp4
+*.npz

@@ -51,12 +51,15 @@ class MockBus:
       - Other command frames [FF..FF, cmd]: returns zero state + warning.
     """
 
-    def __init__(self, *, default_temp_c: float = 30.0):
+    def __init__(self, *, default_temp_c: float = 30.0, send_sleep_s: float = 0.0):
         self._rx_queue: Deque[can.Message] = deque()
         self._state: Dict[int, MotorState] = {}
         self._default_temp_c = float(default_temp_c)
+        self._send_sleep_s = max(0.0, float(send_sleep_s))
 
     def send(self, msg: can.Message) -> None:
+        if self._send_sleep_s > 0.0:
+            time.sleep(self._send_sleep_s)
         data = bytes(msg.data)
         if len(data) < 8:
             return

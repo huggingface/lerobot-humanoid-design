@@ -67,7 +67,7 @@ def _compute_q0_from_contacts(
 
     # This is the requested behavior: move torso contact target, not whole base.
     torso_target.translation[2] += torso_contact_z_offset
-    torso_target.translation[1] = 0.03
+    torso_target.translation[0] = -0.03
     extra_constraints = []
     for fid, world_target in (
         (foot_left_id, left_target),
@@ -89,7 +89,16 @@ def _compute_q0_from_contacts(
 
     all_constraints = list(constraint_models) + extra_constraints
     all_cdata = [cm.createData() for cm in all_constraints]
-    return closedLoopMountProximal(model, data, all_constraints, all_cdata)
+
+    q0 = np.array([
+        -2.44259628e-02, -4.13157028e-04,  7.61338762e-01,  3.98430812e-04,
+        -5.01108401e-02,  8.81077357e-04,  9.98743195e-01,  5.93795217e-04,
+        -1.82532233e-03, -2.31385993e-01,  3.56697690e-01, -2.25630605e-01,
+        9.21516743e-04, -3.04211988e-03,  1.30759344e-03,  2.30980997e-01,
+        3.55098390e-01,  2.24039981e-01,  4.83985526e-04
+    ])
+    # return closedLoopMountProximal(model, data, all_constraints, all_cdata)
+    return(q0)
 
 
 def load_real_robot(base_height: float = 0.58, torso_contact_z_offset: float = -0.10):

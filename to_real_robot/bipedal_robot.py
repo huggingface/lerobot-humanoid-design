@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Union
 
@@ -74,8 +74,9 @@ class BipedalRobotController:
         bus_can0: Optional[Any] = None,
         bus_can1: Optional[Any] = None,
         control_hz: float = 100.0,
-        recv_timeout_s: float = 0.002,
+        recv_timeout_s: float = 0.001,
         log_path: Union[str, Path] = "bipedal_state_log.csv",
+        imu: Optional[Any] = None,
     ):
         self.bus_can0 = bus_can0 if bus_can0 is not None else can.interface.Bus(interface=interface, channel=channel_can0)
         self.bus_can1 = bus_can1 if bus_can1 is not None else can.interface.Bus(interface=interface, channel=channel_can1)
@@ -116,6 +117,11 @@ class BipedalRobotController:
 
         self._viz = None
         self._model_nq = 12
+        self._viz_thread: Optional[threading.Thread] = None
+        self._viz_running = False
+        self._viz_hz = 60.0
+        self._viz_data_lock = threading.Lock()
+        self._viz_raw_latest: Optional[Dict[int, float]] = None
         self._limit_source = "raw"
         self._startup_wrap_checked = False
         self._auto_shift_limits_with_wrap = False
@@ -127,6 +133,12 @@ class BipedalRobotController:
         self.log_path = Path(log_path)
         self._log_fp = None
         self._log_writer = None
+
+        self._imu_lock = threading.Lock()
+        self._imu = imu
+        self._imu_state: Optional[Dict[str, Any]] = None
+        self._orientation_quaternion_xyzw: Optional[tuple[float, float, float, float]] = None
+        self._orientation_stamp_s: float = 0.0
 
     # -------------------------
     # Public API
@@ -178,8 +190,12 @@ class BipedalRobotController:
         *,
         left: Optional[Dict[str, float]] = None,
         right: Optional[Dict[str, float]] = None,
-        velocity_deg_s: float = 0.0,
-        torque_nm: float = 0.0,
+        velocity_deg_s: Union[float, int] = 0.0,
+        torque_nm: Union[float, int] = 0.0,
+        left_velocity_deg_s: Optional[Dict[str, float]] = None,
+        right_velocity_deg_s: Optional[Dict[str, float]] = None,
+        left_torque_nm: Optional[Dict[str, float]] = None,
+        right_torque_nm: Optional[Dict[str, float]] = None,
         kp: Optional[float] = None,
         kd: Optional[float] = None,
     ) -> Dict[int, float]:
@@ -189,6 +205,10 @@ class BipedalRobotController:
             right=right,
             velocity_deg_s=velocity_deg_s,
             torque_nm=torque_nm,
+            left_velocity_deg_s=left_velocity_deg_s,
+            right_velocity_deg_s=right_velocity_deg_s,
+            left_torque_nm=left_torque_nm,
+            right_torque_nm=right_torque_nm,
             kp=kp,
             kd=kd,
         )
@@ -198,18 +218,28 @@ class BipedalRobotController:
         *,
         left: Optional[Dict[str, float]] = None,
         right: Optional[Dict[str, float]] = None,
-        velocity_deg_s: float = 0.0,
-        torque_nm: float = 0.0,
+        velocity_deg_s: Union[float, int] = 0.0,
+        torque_nm: Union[float, int] = 0.0,
+        left_velocity_deg_s: Optional[Dict[str, float]] = None,
+        right_velocity_deg_s: Optional[Dict[str, float]] = None,
+        left_torque_nm: Optional[Dict[str, float]] = None,
+        right_torque_nm: Optional[Dict[str, float]] = None,
         kp: Optional[float] = None,
         kd: Optional[float] = None,
     ) -> Dict[int, float]:
         """
         Update command targets in joint space.
         Joint keys per side: hipz, hipx, hipy, knee, ankle_pitch, ankle_roll.
+        Velocity and torque inputs are interpreted in joint space as well and
+        converted to motor-space using per-motor signs and ankle coupling.
         Returns effective raw motor-space send targets (deg), i.e. after clamp/wrap.
         """
         left = left or {}
         right = right or {}
+        left_velocity_deg_s = left_velocity_deg_s or {}
+        right_velocity_deg_s = right_velocity_deg_s or {}
+        left_torque_nm = left_torque_nm or {}
+        right_torque_nm = right_torque_nm or {}
 
         with self._action_lock:
             proposed = {mid: cmd for mid, cmd in self.action.items()}
@@ -217,21 +247,17 @@ class BipedalRobotController:
             # Build current command in joint space from existing motor commands.
             cur_cmd_raw = {mid: float(proposed[mid].position_deg) for mid in MOTOR_IDS}
             q_cmd_deg = self.motor_state_to_joint_state(cur_cmd_raw, output_radians=False, nq=12)
+            qd_cmd_deg_s = np.full(12, float(velocity_deg_s), dtype=float)
+            tau_cmd_nm = np.full(12, float(torque_nm), dtype=float)
 
             # Apply partial updates in model joint space.
-            joint_index = {
-                "left": {"hipz": 0, "hipx": 1, "hipy": 2, "knee": 3, "ankle_pitch": 4, "ankle_roll": 5},
-                "right": {"hipz": 6, "hipx": 7, "hipy": 8, "knee": 9, "ankle_pitch": 10, "ankle_roll": 11},
-            }
-            for side_name, side_cmd in (("left", left), ("right", right)):
-                for key, value in side_cmd.items():
-                    idx = joint_index[side_name].get(key)
-                    if idx is None:
-                        continue
-                    q_cmd_deg[idx] = float(value)
+            self._apply_joint_side_updates(q_cmd_deg, left=left, right=right)
+            self._apply_joint_side_updates(qd_cmd_deg_s, left=left_velocity_deg_s, right=right_velocity_deg_s)
+            self._apply_joint_side_updates(tau_cmd_nm, left=left_torque_nm, right=right_torque_nm)
 
             # Convert desired joint state back to per-motor raw commands.
             target_raw = self.joint_state_to_motor_state(q_cmd_deg, input_radians=False, output_space="raw")
+            vel_raw, tau_raw = self._joint_vel_tau_to_motor_raw(qd_cmd_deg_s, tau_cmd_nm)
             if not self._passes_action_update_jump_guard(target_raw):
                 req_raw = {mid: float(proposed[mid].position_deg) for mid in MOTOR_IDS}
             else:
@@ -239,8 +265,8 @@ class BipedalRobotController:
                     proposed[mid] = self._with_fields(
                         proposed[mid],
                         target_raw[mid],
-                        velocity_deg_s,
-                        torque_nm,
+                        vel_raw[mid],
+                        tau_raw[mid],
                         kp,
                         kd,
                     )
@@ -251,6 +277,51 @@ class BipedalRobotController:
     def get_state_snapshot(self) -> Dict[int, MotorState]:
         with self._state_lock:
             return {mid: st for mid, st in self.state.items()}
+
+    def attach_imu(self, imu: Any) -> None:
+        with self._imu_lock:
+            self._imu = imu
+            self._imu_state = None
+
+    def attach_bno085_i2c_imu(self, *, address: int = 0x4A) -> None:
+        from IMU_integration import BNO085IMU
+
+        self.attach_imu(BNO085IMU(address=address))
+
+    def get_imu_snapshot(self) -> Optional[Dict[str, Any]]:
+        with self._imu_lock:
+            if self._imu_state is None:
+                return None
+            return dict(self._imu_state)
+
+    def get_orientation_quaternion(self) -> Optional[tuple[float, float, float, float]]:
+        with self._imu_lock:
+            if self._orientation_quaternion_xyzw is None:
+                return None
+            return tuple(self._orientation_quaternion_xyzw)
+
+    def get_orientation_timestamp(self) -> float:
+        with self._imu_lock:
+            return float(self._orientation_stamp_s)
+
+    def get_combined_state_snapshot(self, *, include_joint_state: bool = True) -> Dict[str, Any]:
+        with self._state_lock:
+            motor_snapshot = {mid: asdict(st) for mid, st in self.state.items()}
+        out: Dict[str, Any] = {
+            "time_s": time.time(),
+            "mode": self.mode,
+            "estop": bool(self._estop),
+            "estop_reason": str(self._estop_reason),
+            "motors": motor_snapshot,
+            "imu": self.get_imu_snapshot(),
+            "orientation_quaternion_xyzw": self.get_orientation_quaternion(),
+            "orientation_timestamp_s": self.get_orientation_timestamp(),
+        }
+        if include_joint_state:
+            raw = {mid: float(motor_snapshot[mid]["position_deg"]) for mid in MOTOR_IDS}
+            out["joint_state_rad"] = self.motor_state_to_joint_state(raw, output_radians=True, nq=12).tolist()
+            out["joint_state_deg"] = self.motor_state_to_joint_state(raw, output_radians=False, nq=12).tolist()
+        return out
 
     def get_protocol_usage(self) -> Dict[str, int]:
         return dict(self.protocol_usage)
@@ -275,8 +346,12 @@ class BipedalRobotController:
         *,
         left: Optional[Dict[str, float]] = None,
         right: Optional[Dict[str, float]] = None,
-        velocity_deg_s: float = 0.0,
-        torque_nm: float = 0.0,
+        velocity_deg_s: Union[float, int] = 0.0,
+        torque_nm: Union[float, int] = 0.0,
+        left_velocity_deg_s: Optional[Dict[str, float]] = None,
+        right_velocity_deg_s: Optional[Dict[str, float]] = None,
+        left_torque_nm: Optional[Dict[str, float]] = None,
+        right_torque_nm: Optional[Dict[str, float]] = None,
         kp: Optional[float] = None,
         kd: Optional[float] = None,
     ) -> Dict[int, Dict[str, float]]:
@@ -295,6 +370,10 @@ class BipedalRobotController:
                 right=right,
                 velocity_deg_s=velocity_deg_s,
                 torque_nm=torque_nm,
+                left_velocity_deg_s=left_velocity_deg_s,
+                right_velocity_deg_s=right_velocity_deg_s,
+                left_torque_nm=left_torque_nm,
+                right_torque_nm=right_torque_nm,
                 kp=kp,
                 kd=kd,
             )
@@ -337,16 +416,25 @@ class BipedalRobotController:
             self._running = True
             self._loop_thread = threading.Thread(target=self._run_loop, daemon=True)
             self._loop_thread.start()
+        self._start_viz_thread()
 
     def stop(self, *, disable_motors: bool = True) -> None:
         self._running = False
         if self._loop_thread is not None:
             self._loop_thread.join(timeout=2.0)
         self._loop_thread = None
+        self._stop_viz_thread()
         if disable_motors:
             self.disable_all()
         self._close_log()
         self._shutdown_buses()
+        with self._imu_lock:
+            imu = self._imu
+        if imu is not None and hasattr(imu, "stop"):
+            try:
+                imu.stop()
+            except Exception:
+                pass
 
     def clear_estop(self) -> None:
         self._estop = False
@@ -411,6 +499,7 @@ class BipedalRobotController:
             self._model_nq = int(viz.model.nq)
         except Exception:
             self._model_nq = 12
+        self._start_viz_thread()
 
     def attach_default_meshcat(self, *, zmq_url: str = "tcp://127.0.0.1:6000") -> None:
         if RobotWrapper is None or MeshcatVisualizer is None or meshcat is None or pin is None:
@@ -487,7 +576,8 @@ class BipedalRobotController:
                     self._damping_active = False
                     self._send_action_all()
 
-            self._display_meshcat()
+            self._update_imu_state()
+            self._publish_viz_state()
             self._log_state(missing)
 
             next_tick += period
@@ -500,6 +590,41 @@ class BipedalRobotController:
     def _has_any_valid_state(self) -> bool:
         with self._state_lock:
             return any(st.stamp > 0.0 for st in self.state.values())
+
+    def _update_imu_state(self) -> None:
+        with self._imu_lock:
+            imu = self._imu
+        if imu is None:
+            return
+        try:
+            if hasattr(imu, "read_dict"):
+                imu_state = imu.read_dict()
+            elif hasattr(imu, "read"):
+                raw = imu.read()
+                imu_state = raw if isinstance(raw, dict) else {"data": raw}
+            else:
+                imu_state = {"error": "IMU object has no read/read_dict method"}
+            q_xyzw: Optional[tuple[float, float, float, float]] = None
+            q_raw = imu_state.get("quaternion_xyzw")
+            if isinstance(q_raw, (list, tuple)) and len(q_raw) == 4:
+                try:
+                    q_xyzw = (float(q_raw[0]), float(q_raw[1]), float(q_raw[2]), float(q_raw[3]))
+                except Exception:
+                    q_xyzw = None
+            stamp = imu_state.get("timestamp_s", time.time())
+            try:
+                stamp_s = float(stamp)
+            except Exception:
+                stamp_s = time.time()
+            with self._imu_lock:
+                self._imu_state = dict(imu_state)
+                self._orientation_quaternion_xyzw = q_xyzw
+                self._orientation_stamp_s = stamp_s
+        except Exception as exc:
+            with self._imu_lock:
+                self._imu_state = {"time_s": time.time(), "error": f"{type(exc).__name__}: {exc}"}
+                self._orientation_quaternion_xyzw = None
+                self._orientation_stamp_s = time.time()
 
     def _stale_motor_ids(self, *, stale_s: float = 0.5) -> list[int]:
         now = time.time()
@@ -652,6 +777,76 @@ class BipedalRobotController:
             kp=prev.kp if kp is None else kp,
             kd=prev.kd if kd is None else kd,
         )
+
+    def _joint_index_map(self) -> Dict[str, Dict[str, int]]:
+        return {
+            "left": {"hipz": 0, "hipx": 1, "hipy": 2, "knee": 3, "ankle_pitch": 4, "ankle_roll": 5},
+            "right": {"hipz": 6, "hipx": 7, "hipy": 8, "knee": 9, "ankle_pitch": 10, "ankle_roll": 11},
+        }
+
+    def _apply_joint_side_updates(
+        self,
+        values: np.ndarray,
+        *,
+        left: Optional[Dict[str, float]] = None,
+        right: Optional[Dict[str, float]] = None,
+    ) -> None:
+        joint_index = self._joint_index_map()
+        left = left or {}
+        right = right or {}
+        for side_name, side_cmd in (("left", left), ("right", right)):
+            for key, value in side_cmd.items():
+                idx = joint_index[side_name].get(key)
+                if idx is None:
+                    continue
+                values[idx] = float(value)
+
+    def _joint_vel_tau_to_motor_raw(
+        self,
+        qd_deg_s: np.ndarray,
+        tau_nm: np.ndarray,
+    ) -> tuple[Dict[int, float], Dict[int, float]]:
+        """
+        Map model joint-space (qd, tau) to motor raw-space.
+        Direct joints:
+          q_cal = sign * q_raw + offset  -> qd_raw = qd_cal / sign
+          power consistency -> tau_raw = tau_cal * sign
+        Coupled ankles:
+          pitch = sp*(a1-a2)/2, roll = sr*(a1+a2)/2
+          solve for (a1_dot, a2_dot), and tau_motor = J^T * tau_joint
+        """
+        qd_raw: Dict[int, float] = {}
+        tau_raw: Dict[int, float] = {}
+
+        direct = {
+            0: 1, 1: 2, 2: 3, 3: 4,
+            6: 7, 7: 8, 8: 9, 9: 10,
+        }
+        for qi, mid in direct.items():
+            s = float(self.motor_sign[mid])
+            if abs(s) < 1e-9:
+                raise ValueError(f"Invalid motor sign for m{mid}: {s}")
+            qd_raw[mid] = float(qd_deg_s[qi] / s)
+            tau_raw[mid] = float(tau_nm[qi] * s)
+
+        sp_l = float(ANKLE_COUPLING_CALIBRATION_LEFT["pitch"]["sign"])
+        sr_l = float(ANKLE_COUPLING_CALIBRATION_LEFT["roll"]["sign"])
+        u_l = float(qd_deg_s[4]) / sp_l
+        v_l = float(qd_deg_s[5]) / sr_l
+        qd_raw[5] = u_l + v_l
+        qd_raw[6] = v_l - u_l
+        tau_raw[5] = 0.5 * sp_l * float(tau_nm[4]) + 0.5 * sr_l * float(tau_nm[5])
+        tau_raw[6] = -0.5 * sp_l * float(tau_nm[4]) + 0.5 * sr_l * float(tau_nm[5])
+
+        sp_r = float(ANKLE_COUPLING_CALIBRATION_RIGHT["pitch"]["sign"])
+        sr_r = float(ANKLE_COUPLING_CALIBRATION_RIGHT["roll"]["sign"])
+        u_r = float(qd_deg_s[10]) / sp_r
+        v_r = float(qd_deg_s[11]) / sr_r
+        qd_raw[11] = u_r + v_r
+        qd_raw[12] = v_r - u_r
+        tau_raw[11] = 0.5 * sp_r * float(tau_nm[10]) + 0.5 * sr_r * float(tau_nm[11])
+        tau_raw[12] = -0.5 * sp_r * float(tau_nm[10]) + 0.5 * sr_r * float(tau_nm[11])
+        return qd_raw, tau_raw
 
     def _ankle_pitch_roll_from_actions(self, a1_cmd: MotorCommand, a2_cmd: MotorCommand, *, side_name: str) -> tuple[float, float]:
         cfg = ANKLE_COUPLING_CALIBRATION_LEFT if side_name == "left" else ANKLE_COUPLING_CALIBRATION_RIGHT
@@ -848,13 +1043,21 @@ class BipedalRobotController:
         return (lo_safe <= x <= hi_safe)
 
     def _drain_rx_states(self, *, max_wait_s: float, max_msgs: int = 64) -> int:
-        """Drain and decode state frames after a batched TX phase."""
+        """
+        Drain and decode state frames after a batched TX phase.
+
+        Non-blocking behavior:
+          - stop immediately when no frame is ready
+          - leave late frames for next control iteration
+        """
         n = 0
         deadline = time.perf_counter() + max(0.0, float(max_wait_s))
-        while n < int(max_msgs) and time.perf_counter() < deadline:
-            rx = self._recv_any(0.0005)
+        while n < int(max_msgs):
+            if time.perf_counter() >= deadline:
+                break
+            rx = self._recv_any(0.0)
             if rx is None:
-                continue
+                break
             self._try_update_state_from_msg(rx)
             n += 1
         return n
@@ -995,14 +1198,44 @@ class BipedalRobotController:
     # -------------------------
     # Visualization
     # -------------------------
-    def _display_meshcat(self) -> None:
+    def _start_viz_thread(self) -> None:
         if self._viz is None:
             return
-        q = self._state_to_q_model()
-        try:
-            self._viz.display(q)
-        except Exception:
-            pass
+        if self._viz_thread is not None and self._viz_thread.is_alive():
+            return
+        self._viz_running = True
+        self._viz_thread = threading.Thread(target=self._viz_loop, daemon=True)
+        self._viz_thread.start()
+
+    def _stop_viz_thread(self) -> None:
+        self._viz_running = False
+        if self._viz_thread is not None:
+            self._viz_thread.join(timeout=1.0)
+        self._viz_thread = None
+
+    def _publish_viz_state(self) -> None:
+        if self._viz is None:
+            return
+        with self._state_lock:
+            snap = {mid: float(self.state[mid].position_deg) for mid in MOTOR_IDS}
+        with self._viz_data_lock:
+            self._viz_raw_latest = snap
+
+    def _viz_loop(self) -> None:
+        period = 1.0 / max(1.0, float(self._viz_hz))
+        while self._viz_running:
+            if self._viz is None:
+                time.sleep(period)
+                continue
+            with self._viz_data_lock:
+                raw = self._viz_raw_latest
+            if raw is not None:
+                try:
+                    q = self.motor_state_to_joint_state(raw, output_radians=True, nq=int(self._model_nq))
+                    self._viz.display(q)
+                except Exception:
+                    pass
+            time.sleep(period)
 
     def motor_state_to_joint_state(
         self,
@@ -1149,6 +1382,12 @@ class BipedalRobotController:
         raise ValueError(f"Unsupported motor id {motor_id}, expected 1..12")
 
     def _recv_any(self, timeout_s: float):
+        if float(timeout_s) <= 0.0:
+            msg = self.bus_can0.recv(0.0)
+            if msg is not None:
+                return msg
+            return self.bus_can1.recv(0.0)
+
         deadline = time.perf_counter() + max(0.0, float(timeout_s))
         while time.perf_counter() < deadline:
             msg = self.bus_can0.recv(0.0)
