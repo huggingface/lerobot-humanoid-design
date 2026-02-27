@@ -2,9 +2,9 @@ _wandb:
     value:
         cli_version: 0.24.0
         e:
-            zrsbkymx4kp0h6wwcu6d2nc48nt1327e:
+            ov1bf5jprtnxh060hvz30cn604svujbj:
                 args:
-                    - Mjlab-Velocity-Rough-LeRobot-Humanoid-no-arms
+                    - Mjlab-Velocity-Flat-LeRobot-Humanoid-no-arms
                     - --env.scene.num-envs
                     - "4096"
                 codePath: .venv/bin/train
@@ -15,11 +15,11 @@ _wandb:
                 disk:
                     /:
                         total: "1843250438144"
-                        used: "1678611382272"
+                        used: "1714732281856"
                 email: virgile.batto@huggingface.co
                 executable: /home/virgile_batto/devel/lerobot-legged-zoo/.venv/bin/python
                 git:
-                    commit: d99a3ad4f07ef4a3c84c4bb397c12564d2e1b73f
+                    commit: acb0c04e1aab9c5f3695306cacce5b9a9095cd54
                     remote: git@github.com:Virgileboat/lerobot-legged-zoo.git
                 gpu: NVIDIA GeForce RTX 4090
                 gpu_count: 1
@@ -32,12 +32,12 @@ _wandb:
                 host: lerobot
                 memory:
                     total: "67222409216"
-                os: Linux-6.8.0-90-generic-x86_64-with-glibc2.35
+                os: Linux-6.8.0-94-generic-x86_64-with-glibc2.35
                 program: /home/virgile_batto/devel/lerobot-legged-zoo/.venv/bin/train
                 python: CPython 3.13.11
                 root: /home/virgile_batto/devel/lerobot-legged-zoo
-                startedAt: "2026-02-03T09:08:00.907510Z"
-                writerId: zrsbkymx4kp0h6wwcu6d2nc48nt1327e
+                startedAt: "2026-02-26T05:32:10.435102Z"
+                writerId: ov1bf5jprtnxh060hvz30cn604svujbj
         m: []
         python_version: 3.13.11
         t:
@@ -79,12 +79,12 @@ env_cfg:
                 offset: 0
                 preserve_order: false
                 scale:
-                    anklex_.*: 0.2533029591203243
-                    ankley_.*: 0.2533029591203243
-                    hipx_.*: 0.2786332550323567
-                    hipy_.*: 0.2786332550323567
-                    hipz_.*: 0.2786332550323567
-                    knee_.*: 0.37151100670980897
+                    anklex_.*: 0.55
+                    ankley_.*: 0.55
+                    hipx_.*: 0.24444444444444444
+                    hipy_.*: 0.24444444444444444
+                    hipz_.*: 0.09375
+                    knee_.*: 0.24444444444444444
                 transmission_type: JOINT
                 use_default_offset: true
         commands:
@@ -96,14 +96,14 @@ env_cfg:
                 init_velocity_prob: 0
                 ranges:
                     ang_vel_z:
-                        - -0.5
-                        - 0.5
+                        - -0.2
+                        - 0.2
                     heading:
                         - -3.141592653589793
                         - 3.141592653589793
                     lin_vel_x:
-                        - -1
-                        - 1
+                        - -0.5
+                        - 0.5
                     lin_vel_y:
                         - -1
                         - 1
@@ -116,33 +116,23 @@ env_cfg:
                     scale: 0.5
                     z_offset: 0.9
         curriculum:
-            command_vel:
-                func: mjlab.tasks.velocity.mdp.curriculums.commands_vel
+            action_rate_weight:
+                func: mjlab.tasks.velocity.mdp.curriculums.reward_weight
                 params:
-                    command_name: twist
-                    velocity_stages:
-                        - ang_vel_z:
-                            - -0.5
-                            - 0.5
-                          lin_vel_x:
-                            - -1
-                            - 1
-                          step: 0
-                        - ang_vel_z:
-                            - -0.7
-                            - 0.7
-                          lin_vel_x:
-                            - -1.5
-                            - 2
-                          step: 120000
-                        - lin_vel_x:
-                            - -2
-                            - 3
-                          step: 240000
-            terrain_levels:
-                func: mjlab.tasks.velocity.mdp.curriculums.terrain_levels_vel
-                params:
-                    command_name: twist
+                    reward_name: action_rate_l2
+                    weight_stages:
+                        - step: 0
+                          weight: -0.1
+                        - step: 120000
+                          weight: -0.38
+                        - step: 240000
+                          weight: -0.66
+                        - step: 360000
+                          weight: -0.94
+                        - step: 480000
+                          weight: -1.22
+                        - step: 600000
+                          weight: -1.5
         decimation: 4
         episode_length_s: 20
         events:
@@ -187,14 +177,14 @@ env_cfg:
                     operation: add
                     ranges:
                         "0":
-                            - -0.025
-                            - 0.025
+                            - -0.05
+                            - 0.05
                         "1":
-                            - -0.025
-                            - 0.025
+                            - -0.05
+                            - 0.05
                         "2":
-                            - -0.03
-                            - 0.03
+                            - -0.06
+                            - 0.06
             encoder_bias:
                 domain_randomization: false
                 func: mjlab.envs.mdp.events.randomize_encoder_bias
@@ -232,8 +222,8 @@ env_cfg:
                             slice_stop: null
                         site_names: null
                     bias_range:
-                        - -0.015
-                        - 0.015
+                        - -0.08726646259971647
+                        - 0.08726646259971647
             foot_friction:
                 domain_randomization: true
                 func: mjlab.envs.mdp.events.randomize_field
@@ -259,17 +249,7 @@ env_cfg:
                             slice_stop: null
                         geom_names:
                             - left_foot1_collision
-                            - left_foot2_collision
-                            - left_foot3_collision
-                            - left_foot4_collision
-                            - left_foot5_collision
-                            - left_foot6_collision
                             - right_foot1_collision
-                            - right_foot2_collision
-                            - right_foot3_collision
-                            - right_foot4_collision
-                            - right_foot5_collision
-                            - right_foot6_collision
                         joint_ids:
                             slice_start: null
                             slice_step: null
@@ -326,6 +306,12 @@ env_cfg:
                 mode: reset
                 params:
                     pose_range:
+                        pitch:
+                            - -0.08726646259971647
+                            - 0.08726646259971647
+                        roll:
+                            - -0.08726646259971647
+                            - 0.08726646259971647
                         x:
                             - -0.5
                             - 0.5
@@ -417,8 +403,8 @@ env_cfg:
                         func: mjlab.envs.mdp.observations.builtin_sensor
                         history_length: 0
                         noise:
-                            n_max: 0.2
-                            n_min: -0.2
+                            n_max: 0.35
+                            n_min: -0.35
                             operation: add
                         params:
                             sensor_name: robot/imu_ang_vel
@@ -435,8 +421,8 @@ env_cfg:
                         func: mjlab.envs.mdp.observations.builtin_sensor
                         history_length: 0
                         noise:
-                            n_max: 0.5
-                            n_min: -0.5
+                            n_max: 0.15
+                            n_min: -0.15
                             operation: add
                         params:
                             sensor_name: robot/imu_lin_vel
@@ -557,8 +543,8 @@ env_cfg:
                         func: mjlab.envs.mdp.observations.joint_pos_rel
                         history_length: 0
                         noise:
-                            n_max: 0.01
-                            n_min: -0.01
+                            n_max: 0.05235987755982989
+                            n_min: -0.05235987755982989
                             operation: add
                         scale: null
                     joint_vel:
@@ -573,8 +559,8 @@ env_cfg:
                         func: mjlab.envs.mdp.observations.joint_vel_rel
                         history_length: 0
                         noise:
-                            n_max: 1.5
-                            n_min: -1.5
+                            n_max: 4
+                            n_min: -4
                             operation: add
                         scale: null
                     projected_gravity:
@@ -589,8 +575,8 @@ env_cfg:
                         func: mjlab.envs.mdp.observations.projected_gravity
                         history_length: 0
                         noise:
-                            n_max: 0.05
-                            n_min: -0.05
+                            n_max: 0.07
+                            n_min: -0.07
                             operation: add
                         scale: null
             policy:
@@ -627,8 +613,8 @@ env_cfg:
                         func: mjlab.envs.mdp.observations.builtin_sensor
                         history_length: 0
                         noise:
-                            n_max: 0.2
-                            n_min: -0.2
+                            n_max: 0.35
+                            n_min: -0.35
                             operation: add
                         params:
                             sensor_name: robot/imu_ang_vel
@@ -645,8 +631,8 @@ env_cfg:
                         func: mjlab.envs.mdp.observations.builtin_sensor
                         history_length: 0
                         noise:
-                            n_max: 0.5
-                            n_min: -0.5
+                            n_max: 0.15
+                            n_min: -0.15
                             operation: add
                         params:
                             sensor_name: robot/imu_lin_vel
@@ -678,8 +664,8 @@ env_cfg:
                         func: mjlab.envs.mdp.observations.joint_pos_rel
                         history_length: 0
                         noise:
-                            n_max: 0.01
-                            n_min: -0.01
+                            n_max: 0.05235987755982989
+                            n_min: -0.05235987755982989
                             operation: add
                         scale: null
                     joint_vel:
@@ -694,8 +680,8 @@ env_cfg:
                         func: mjlab.envs.mdp.observations.joint_vel_rel
                         history_length: 0
                         noise:
-                            n_max: 1.5
-                            n_min: -1.5
+                            n_max: 4
+                            n_min: -4
                             operation: add
                         scale: null
                     projected_gravity:
@@ -710,14 +696,24 @@ env_cfg:
                         func: mjlab.envs.mdp.observations.projected_gravity
                         history_length: 0
                         noise:
-                            n_max: 0.05
-                            n_min: -0.05
+                            n_max: 0.07
+                            n_min: -0.07
                             operation: add
                         scale: null
         rewards:
+            action_fft_band_le_3hz_ratio:
+                func: <training_exemples.lerobot_humanoid_no_arms.env_cfgs._ActionFftBandRatioReward object at 0x7284f0a876f0>
+                params:
+                    cutoff_hz: 3
+                    history_len: 50
+                    min_history: 50
+                weight: 3
             action_rate_l2:
                 func: mjlab.envs.mdp.rewards.action_rate_l2
                 weight: -0.1
+            actuator_torque_l2:
+                func: training_exemples.lerobot_humanoid_no_arms.env_cfgs._all_actuator_torque_l2
+                weight: -0.0002
             air_time:
                 func: mjlab.tasks.velocity.mdp.rewards.feet_air_time
                 params:
@@ -731,6 +727,17 @@ env_cfg:
                 func: mjlab.tasks.velocity.mdp.rewards.angular_momentum_penalty
                 params:
                     sensor_name: robot/root_angmom
+                weight: -0.02
+            ankle_power_l1:
+                func: training_exemples.lerobot_humanoid_no_arms.env_cfgs._ankle_actuator_power_l1
+                weight: -0.0005
+            ankle_torque_l2:
+                func: training_exemples.lerobot_humanoid_no_arms.env_cfgs._ankle_actuator_torque_l2
+                weight: -0.003
+            ankle_torque_over_5nm_l2:
+                func: training_exemples.lerobot_humanoid_no_arms.env_cfgs._ankle_torque_above_limit_l2
+                params:
+                    limit_nm: 5
                 weight: -0.02
             body_ang_vel:
                 func: mjlab.tasks.velocity.mdp.rewards.body_angular_velocity_penalty
@@ -915,8 +922,8 @@ env_cfg:
                     command_name: twist
                     running_threshold: 1.5
                     std_running:
-                        .*anklex.*: 0.15
-                        .*ankley.*: 0.35
+                        .*anklex.*: 0.25
+                        .*ankley.*: 0.45
                         .*hipx.*: 0.2
                         .*hipy.*: 0.5
                         .*hipz.*: 0.2
@@ -924,8 +931,8 @@ env_cfg:
                     std_standing:
                         .*: 0.05
                     std_walking:
-                        .*anklex.*: 0.1
-                        .*ankley.*: 0.25
+                        .*anklex.*: 0.2
+                        .*ankley.*: 0.35
                         .*hipx.*: 0.15
                         .*hipy.*: 0.3
                         .*hipz.*: 0.15
@@ -997,28 +1004,42 @@ env_cfg:
                     articulation:
                         actuators:
                             - armature: 0.02
-                              damping: 5.0265482456
-                              effort_limit: 88
+                              damping: 2
+                              effort_limit: 15
                               frictionloss: 0
-                              stiffness: 78.95683520420137
+                              stiffness: 40
                               target_names_expr:
                                 - hipz_.*
+                              transmission_type: JOINT
+                            - armature: 0.02
+                              damping: 2
+                              effort_limit: 88
+                              frictionloss: 0
+                              stiffness: 90
+                              target_names_expr:
                                 - hipx_.*
+                              transmission_type: JOINT
+                            - armature: 0.02
+                              damping: 2
+                              effort_limit: 88
+                              frictionloss: 0
+                              stiffness: 90
+                              target_names_expr:
                                 - hipy_.*
                               transmission_type: JOINT
                             - armature: 0.015
-                              damping: 3.7699111841999997
+                              damping: 2
                               effort_limit: 88
                               frictionloss: 0
-                              stiffness: 59.21762640315102
+                              stiffness: 90
                               target_names_expr:
                                 - knee_.*
                               transmission_type: JOINT
                             - armature: 0.01
-                              damping: 2.5132741228
-                              effort_limit: 40
+                              damping: 3
+                              effort_limit: 44
                               frictionloss: 0
-                              stiffness: 39.478417602100684
+                              stiffness: 20
                               target_names_expr:
                                 - ankley_.*
                                 - anklex_.*
@@ -1029,27 +1050,18 @@ env_cfg:
                         - conaffinity: 1
                           condim:
                             .*_collision: 1
-                            ^(left|right)_foot[1-6]_collision$: 3
+                            ^(left|right)_foot1_collision$: 3
                           contype: 1
                           disable_other_geoms: true
                           friction:
-                            ^(left|right)_foot[1-6]_collision$:
+                            ^(left|right)_foot1_collision$:
                                 - 0.6
                           geom_names_expr:
                             - .*_collision
                           priority:
-                            ^(left|right)_foot[1-6]_collision$: 1
-                          solimp:
-                            ^(left|right)_foot[1-6]_collision$:
-                                - 0.995
-                                - 0.9995
-                                - 0.001
-                                - 0.5
-                                - 2
-                          solref:
-                            ^(left|right)_foot[1-6]_collision$:
-                                - 0.005
-                                - 1
+                            ^(left|right)_foot1_collision$: 1
+                          solimp: null
+                          solref: null
                     init_state:
                         ang_vel:
                             - 0
@@ -1124,115 +1136,16 @@ env_cfg:
             spec_fn: null
             terrain:
                 env_spacing: 2
-                max_init_terrain_level: 5
+                max_init_terrain_level: 2
                 num_envs: 4096
-                terrain_generator:
-                    add_lights: true
-                    border_height: 1
-                    border_width: 20
-                    color_scheme: height
-                    curriculum: true
-                    difficulty_range:
-                        - 0
-                        - 1
-                    num_cols: 20
-                    num_rows: 10
-                    seed: null
-                    size:
-                        - 8
-                        - 8
-                    sub_terrains:
-                        flat:
-                            proportion: 0.2
-                            size:
-                                - 8
-                                - 8
-                        hf_pyramid_slope:
-                            base_thickness_ratio: 1
-                            border_width: 0.25
-                            horizontal_scale: 0.1
-                            inverted: false
-                            platform_width: 2
-                            proportion: 0.1
-                            size:
-                                - 8
-                                - 8
-                            slope_range:
-                                - 0
-                                - 0.3
-                            vertical_scale: 0.005
-                        hf_pyramid_slope_inv:
-                            base_thickness_ratio: 1
-                            border_width: 0.25
-                            horizontal_scale: 0.1
-                            inverted: true
-                            platform_width: 2
-                            proportion: 0.1
-                            size:
-                                - 8
-                                - 8
-                            slope_range:
-                                - 0
-                                - 0.3
-                            vertical_scale: 0.005
-                        pyramid_stairs:
-                            border_width: 1
-                            holes: false
-                            platform_width: 3
-                            proportion: 0.2
-                            size:
-                                - 8
-                                - 8
-                            step_height_range:
-                                - 0
-                                - 0.03
-                            step_width: 0.3
-                        pyramid_stairs_inv:
-                            border_width: 1
-                            holes: false
-                            platform_width: 3
-                            proportion: 0.2
-                            size:
-                                - 8
-                                - 8
-                            step_height_range:
-                                - 0
-                                - 0.03
-                            step_width: 0.3
-                        random_rough:
-                            base_thickness_ratio: 1
-                            border_width: 0.25
-                            downsampled_scale: null
-                            horizontal_scale: 0.1
-                            noise_range:
-                                - 0.01
-                                - 0.03
-                            noise_step: 0.02
-                            proportion: 0.1
-                            size:
-                                - 8
-                                - 8
-                            vertical_scale: 0.005
-                        wave_terrain:
-                            amplitude_range:
-                                - 0
-                                - 0.05
-                            base_thickness_ratio: 0.25
-                            border_width: 0.25
-                            horizontal_scale: 0.1
-                            num_waves: 4
-                            proportion: 0.1
-                            size:
-                                - 8
-                                - 8
-                            vertical_scale: 0.005
-                terrain_type: generator
+                terrain_generator: null
+                terrain_type: plane
         seed: 42
         sim:
-            contact_sensor_maxmatch: 500
+            contact_sensor_maxmatch: 64
             ls_parallel: true
             mujoco:
-                ccd_iterations: 500
+                ccd_iterations: 50
                 cone: pyramidal
                 gravity:
                     - 0
@@ -1253,8 +1166,8 @@ env_cfg:
                 enabled: false
                 max_envs_to_dump: 5
                 output_dir: /tmp/mjlab/nan_dumps
-            nconmax: 45
-            njmax: 1500
+            nconmax: null
+            njmax: 300
         terminations:
             fell_over:
                 func: mjlab.envs.mdp.terminations.bad_orientation
@@ -1281,7 +1194,7 @@ env_cfg:
             origin_type: ASSET_BODY
             width: 320
 log_dir:
-    value: logs/rsl_rl/lerobot_humanoid_no_arms_velocity/2026-02-03_10-07-41
+    value: logs/rsl_rl/lerobot_humanoid_no_arms_velocity/2026-02-26_06-32-06
 policy_cfg:
     value:
         activation: elu

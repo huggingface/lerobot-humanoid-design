@@ -20,6 +20,7 @@ class IMUState:
     quaternion_xyzw: Optional[Tuple[float, float, float, float]] = None
     acceleration_mps2: Optional[Tuple[float, float, float]] = None
     gyro_rads: Optional[Tuple[float, float, float]] = None
+    linear_velocity_mps: Optional[Tuple[float, float, float]] = None
     linear_acceleration_mps2: Optional[Tuple[float, float, float]] = None
     gravity_mps2: Optional[Tuple[float, float, float]] = None
     calibration: Optional[Any] = None
@@ -30,6 +31,7 @@ class IMUState:
             "quaternion_xyzw": self.quaternion_xyzw,
             "acceleration_mps2": self.acceleration_mps2,
             "gyro_rads": self.gyro_rads,
+            "linear_velocity_mps": self.linear_velocity_mps,
             "linear_acceleration_mps2": self.linear_acceleration_mps2,
             "gravity_mps2": self.gravity_mps2,
             "calibration": self.calibration,
@@ -183,14 +185,40 @@ class JY901UARTIMU:
     def read(self) -> IMUState:
         if self._imu is None:
             return IMUState(timestamp_s=time.time())
-        sample = self._imu.get_quaternion()
-        if sample is None:
-            return IMUState(timestamp_s=time.time())
-        # JY901 exposes wxyz, controller expects xyzw.
+        obs = self._imu.get_observation()
+        quat = obs.quat
+        ang = obs.ang_vel_rad_s
+        lin_acc = obs.lin_acc_m_s2
+        lin_vel = obs.lin_vel_m_s
+
+        quaternion_xyzw = None
+        calibration: Optional[Dict[str, Any]] = None
+        if quat is not None:
+            # JY901 exposes wxyz, controller expects xyzw.
+            quaternion_xyzw = (float(quat.x), float(quat.y), float(quat.z), float(quat.w))
+            calibration = {"source": str(quat.source), "stats": self._imu.get_stats()}
+        else:
+            calibration = {"stats": self._imu.get_stats()}
+
+        gyro_rads = None
+        if ang is not None:
+            gyro_rads = (float(ang.x), float(ang.y), float(ang.z))
+
+        linear_acceleration_mps2 = None
+        if lin_acc is not None:
+            linear_acceleration_mps2 = (float(lin_acc.x), float(lin_acc.y), float(lin_acc.z))
+
+        linear_velocity_mps = None
+        if lin_vel is not None:
+            linear_velocity_mps = (float(lin_vel.x), float(lin_vel.y), float(lin_vel.z))
+
         return IMUState(
-            timestamp_s=float(sample.timestamp),
-            quaternion_xyzw=(float(sample.x), float(sample.y), float(sample.z), float(sample.w)),
-            calibration={"source": str(sample.source), "stats": self._imu.get_stats()},
+            timestamp_s=float(obs.timestamp),
+            quaternion_xyzw=quaternion_xyzw,
+            gyro_rads=gyro_rads,
+            linear_velocity_mps=linear_velocity_mps,
+            linear_acceleration_mps2=linear_acceleration_mps2,
+            calibration=calibration,
         )
 
     def read_dict(self) -> Dict[str, Any]:
@@ -208,6 +236,7 @@ class MockIMU:
         quaternion_xyzw: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
         acceleration_mps2: Tuple[float, float, float] = (0.0, 0.0, 9.81),
         gyro_rads: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        linear_velocity_mps: Tuple[float, float, float] = (0.0, 0.0, 0.0),
         linear_acceleration_mps2: Tuple[float, float, float] = (0.0, 0.0, 0.0),
         gravity_mps2: Tuple[float, float, float] = (0.0, 0.0, -9.81),
     ) -> None:
@@ -215,6 +244,7 @@ class MockIMU:
             quaternion_xyzw=quaternion_xyzw,
             acceleration_mps2=acceleration_mps2,
             gyro_rads=gyro_rads,
+            linear_velocity_mps=linear_velocity_mps,
             linear_acceleration_mps2=linear_acceleration_mps2,
             gravity_mps2=gravity_mps2,
         )
@@ -225,6 +255,7 @@ class MockIMU:
         quaternion_xyzw: Optional[Tuple[float, float, float, float]] = None,
         acceleration_mps2: Optional[Tuple[float, float, float]] = None,
         gyro_rads: Optional[Tuple[float, float, float]] = None,
+        linear_velocity_mps: Optional[Tuple[float, float, float]] = None,
         linear_acceleration_mps2: Optional[Tuple[float, float, float]] = None,
         gravity_mps2: Optional[Tuple[float, float, float]] = None,
     ) -> None:
@@ -234,6 +265,8 @@ class MockIMU:
             self.acceleration_mps2 = tuple(float(v) for v in acceleration_mps2)
         if gyro_rads is not None:
             self.gyro_rads = tuple(float(v) for v in gyro_rads)
+        if linear_velocity_mps is not None:
+            self.linear_velocity_mps = tuple(float(v) for v in linear_velocity_mps)
         if linear_acceleration_mps2 is not None:
             self.linear_acceleration_mps2 = tuple(float(v) for v in linear_acceleration_mps2)
         if gravity_mps2 is not None:
@@ -245,6 +278,7 @@ class MockIMU:
             quaternion_xyzw=self.quaternion_xyzw,
             acceleration_mps2=self.acceleration_mps2,
             gyro_rads=self.gyro_rads,
+            linear_velocity_mps=self.linear_velocity_mps,
             linear_acceleration_mps2=self.linear_acceleration_mps2,
             gravity_mps2=self.gravity_mps2,
             calibration={"mock": True},

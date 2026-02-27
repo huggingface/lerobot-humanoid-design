@@ -85,6 +85,9 @@ class BipedalRobotController:
         self.mode = "state_only"
 
         self.state: Dict[int, MotorState] = {mid: MotorState() for mid in MOTOR_IDS}
+        self.joint_velocity_deg_s = np.zeros(12, dtype=float)
+        self.joint_velocity_rad_s = np.zeros(12, dtype=float)
+        self._joint_velocity_stamp_s = 0.0
         self.gains: Dict[int, JointGains] = {
             mid: JointGains(*DEFAULT_GAINS.get(mid, (5.0, 0.5))) for mid in MOTOR_IDS
         }
@@ -308,6 +311,9 @@ class BipedalRobotController:
     def get_combined_state_snapshot(self, *, include_joint_state: bool = True) -> Dict[str, Any]:
         with self._state_lock:
             motor_snapshot = {mid: asdict(st) for mid, st in self.state.items()}
+            joint_vel_deg_s = np.asarray(self.joint_velocity_deg_s, dtype=float).copy()
+            joint_vel_rad_s = np.asarray(self.joint_velocity_rad_s, dtype=float).copy()
+            joint_vel_stamp_s = float(self._joint_velocity_stamp_s)
         out: Dict[str, Any] = {
             "time_s": time.time(),
             "mode": self.mode,
@@ -322,6 +328,9 @@ class BipedalRobotController:
             raw = {mid: float(motor_snapshot[mid]["position_deg"]) for mid in MOTOR_IDS}
             out["joint_state_rad"] = self.motor_state_to_joint_state(raw, output_radians=True, nq=12).tolist()
             out["joint_state_deg"] = self.motor_state_to_joint_state(raw, output_radians=False, nq=12).tolist()
+            out["joint_velocity_deg_s"] = joint_vel_deg_s.tolist()
+            out["joint_velocity_rad_s"] = joint_vel_rad_s.tolist()
+            out["joint_velocity_timestamp_s"] = joint_vel_stamp_s
         return out
 
     def get_protocol_usage(self) -> Dict[str, int]:
@@ -681,6 +690,7 @@ class BipedalRobotController:
 
             with self._state_lock:
                 self.state[motor_id] = st
+                self._refresh_joint_velocity_from_state_locked(stamp_s=st.stamp)
 
             # Avoid premature estop before startup wrap correction has run once.
             if (not self._startup_wrap_checked):
@@ -875,6 +885,14 @@ class BipedalRobotController:
         roll = sign_r * ((float(a1) + float(a2)) / 2.0) + off_r
         return pitch, roll
 
+    def _ankle_pitch_roll_vel_from_cal_values(self, a1_vel: float, a2_vel: float, *, side_name: str) -> tuple[float, float]:
+        cfg = ANKLE_COUPLING_CALIBRATION_LEFT if side_name == "left" else ANKLE_COUPLING_CALIBRATION_RIGHT
+        sign_p = float(cfg["pitch"]["sign"])
+        sign_r = float(cfg["roll"]["sign"])
+        pitch_vel = sign_p * ((float(a1_vel) - float(a2_vel)) / 2.0)
+        roll_vel = sign_r * ((float(a1_vel) + float(a2_vel)) / 2.0)
+        return pitch_vel, roll_vel
+
     def _ankle_motors_from_pitch_roll(self, pitch: float, roll: float, *, side_name: str) -> tuple[float, float]:
         cfg = ANKLE_COUPLING_CALIBRATION_LEFT if side_name == "left" else ANKLE_COUPLING_CALIBRATION_RIGHT
         sign_p = float(cfg["pitch"]["sign"])
@@ -886,6 +904,48 @@ class BipedalRobotController:
         a1 = p + r
         a2 = r - p
         return a1, a2
+
+    def motor_velocity_to_joint_velocity(
+        self,
+        motor_raw_vel_deg_s: Dict[int, float],
+        *,
+        output_radians: bool = True,
+        nq: Optional[int] = None,
+    ) -> np.ndarray:
+        """
+        Convert per-motor raw velocities (deg/s) to model joint velocities.
+        Joint order matches `motor_state_to_joint_state`.
+        """
+        out_nq = int(self._model_nq if nq is None else nq)
+        qd_deg_s = np.zeros(max(12, out_nq), dtype=float)
+
+        qd_deg_s[0] = float(self.motor_sign[1] * float(motor_raw_vel_deg_s[1]))
+        qd_deg_s[1] = float(self.motor_sign[2] * float(motor_raw_vel_deg_s[2]))
+        qd_deg_s[2] = float(self.motor_sign[3] * float(motor_raw_vel_deg_s[3]))
+        qd_deg_s[3] = float(self.motor_sign[4] * float(motor_raw_vel_deg_s[4]))
+        qd_deg_s[6] = float(self.motor_sign[7] * float(motor_raw_vel_deg_s[7]))
+        qd_deg_s[7] = float(self.motor_sign[8] * float(motor_raw_vel_deg_s[8]))
+        qd_deg_s[8] = float(self.motor_sign[9] * float(motor_raw_vel_deg_s[9]))
+        qd_deg_s[9] = float(self.motor_sign[10] * float(motor_raw_vel_deg_s[10]))
+
+        l_a1_vel = float(self.motor_sign[5] * float(motor_raw_vel_deg_s[5]))
+        l_a2_vel = float(self.motor_sign[6] * float(motor_raw_vel_deg_s[6]))
+        qd_deg_s[4], qd_deg_s[5] = self._ankle_pitch_roll_vel_from_cal_values(l_a1_vel, l_a2_vel, side_name="left")
+
+        r_a1_vel = float(self.motor_sign[11] * float(motor_raw_vel_deg_s[11]))
+        r_a2_vel = float(self.motor_sign[12] * float(motor_raw_vel_deg_s[12]))
+        qd_deg_s[10], qd_deg_s[11] = self._ankle_pitch_roll_vel_from_cal_values(r_a1_vel, r_a2_vel, side_name="right")
+
+        if output_radians:
+            return np.deg2rad(qd_deg_s[:out_nq])
+        return qd_deg_s[:out_nq]
+
+    def _refresh_joint_velocity_from_state_locked(self, *, stamp_s: Optional[float] = None) -> None:
+        motor_vel_raw_deg_s = {mid: float(self.state[mid].velocity_deg_s) for mid in MOTOR_IDS}
+        qd_deg_s = self.motor_velocity_to_joint_velocity(motor_vel_raw_deg_s, output_radians=False, nq=12)
+        self.joint_velocity_deg_s = np.asarray(qd_deg_s, dtype=float).copy()
+        self.joint_velocity_rad_s = np.deg2rad(self.joint_velocity_deg_s)
+        self._joint_velocity_stamp_s = float(time.time() if stamp_s is None else stamp_s)
 
     def _current_ankle_pitch(self, *, side_name: str) -> Optional[float]:
         pr = self._ankle_pitch_roll_from_state(side_name=side_name)
@@ -1177,6 +1237,26 @@ class BipedalRobotController:
                 f"m{mid}_tau_nm",
                 f"m{mid}_temp_c",
             ]
+        joint_names = (
+            "left_hipz",
+            "left_hipx",
+            "left_hipy",
+            "left_knee",
+            "left_ankle_pitch",
+            "left_ankle_roll",
+            "right_hipz",
+            "right_hipx",
+            "right_hipy",
+            "right_knee",
+            "right_ankle_pitch",
+            "right_ankle_roll",
+        )
+        for jn in joint_names:
+            header.append(f"{jn}_pos_deg")
+        for jn in joint_names:
+            header.append(f"{jn}_vel_deg_s")
+        for jn in joint_names:
+            header.append(f"{jn}_vel_rad_s")
         self._log_writer.writerow(header)
         self._log_fp.flush()
 
@@ -1185,12 +1265,19 @@ class BipedalRobotController:
             return
         with self._state_lock:
             snapshot = {mid: st for mid, st in self.state.items()}
+            joint_vel_deg_s = np.asarray(self.joint_velocity_deg_s, dtype=float).copy()
+            joint_vel_rad_s = np.asarray(self.joint_velocity_rad_s, dtype=float).copy()
         with self._action_lock:
             action_snapshot = {mid: cmd for mid, cmd in self.action.items()}
         row = [time.time(), self.mode, int(self._estop), self._estop_reason, int(self._damping_active), ",".join(map(str, missing_ids))]
         for mid in MOTOR_IDS:
             st = snapshot[mid]
             row += [st.position_deg, action_snapshot[mid].position_deg, st.velocity_deg_s, st.torque_nm, st.temp_mos_c]
+        raw = {mid: float(snapshot[mid].position_deg) for mid in MOTOR_IDS}
+        joint_pos_deg = self.motor_state_to_joint_state(raw, output_radians=False, nq=12)
+        row += [float(v) for v in np.asarray(joint_pos_deg, dtype=float).reshape(-1)[:12]]
+        row += [float(v) for v in joint_vel_deg_s.reshape(-1)[:12]]
+        row += [float(v) for v in joint_vel_rad_s.reshape(-1)[:12]]
         self._log_writer.writerow(row)
         self._log_fp.flush()
 

@@ -5,9 +5,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import argparse
+import csv
 import importlib
 import json
 import pickle
+import re
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -16,6 +18,7 @@ from collections import deque
 import numpy as np
 
 from bipedal_robot import BipedalRobotController
+from root_constant import ANKLE_COUPLING_CALIBRATION_LEFT, ANKLE_COUPLING_CALIBRATION_RIGHT, COMMAND_MARGIN_DEG
 
 try:
     import yaml  # type: ignore
@@ -53,6 +56,8 @@ JOINT_KEY_TO_MOTOR_ID = {
     "right.ankle_roll": 12,
 }
 
+ANKLE_TRUE_LIMIT_CLAMP_EPS_DEG = 0.01
+
 
 @dataclass
 class AgentSpec:
@@ -62,6 +67,9 @@ class AgentSpec:
     inference_hz: float = 50.0
     action_mode: str = "absolute"  # absolute or delta
     action_scale: float = 1.0
+    ankle_action_abs_limit: Optional[float] = None  # clamp ankle policy outputs before action scaling
+    clamp_ankle_to_true_limits: bool = False
+    joint_vel_source: str = "snapshot"  # snapshot | finite_diff | auto
     policy_terms: List[str] = field(default_factory=list)
     action_scales_rad: List[float] = field(default_factory=list)
 
@@ -254,6 +262,73 @@ def _extract_action_scales(cfg: Dict[str, Any], action_keys: List[str]) -> List[
     return out
 
 
+def _extract_name_list_from_onnx_bytes(
+    onnx_path: Path,
+    *,
+    normalizer: Optional[Any] = None,
+    allowed_terms: Optional[set[str]] = None,
+) -> List[str]:
+    """
+    Best-effort extraction of comma-separated name lists embedded in ONNX exports.
+    """
+    if not onnx_path.exists() or onnx_path.suffix.lower() != ".onnx":
+        return []
+    try:
+        text = onnx_path.read_bytes().decode("latin1", errors="ignore")
+    except Exception:
+        return []
+
+    best: List[str] = []
+    best_score = 0
+    for m in re.finditer(r"([A-Za-z0-9_]+(?:,[A-Za-z0-9_]+){3,})", text):
+        raw_tokens = [tok.strip().lower() for tok in m.group(1).split(",") if tok.strip()]
+        if not raw_tokens:
+            continue
+        if allowed_terms is not None:
+            tokens = []
+            for t in raw_tokens:
+                mapped = None
+                for term in allowed_terms:
+                    if t == term or term in t:
+                        mapped = term
+                        break
+                if mapped is not None:
+                    tokens.append(mapped)
+            score = len(tokens)
+        elif normalizer is not None:
+            norm_tokens = [normalizer(t) for t in raw_tokens]
+            tokens = [t for t in norm_tokens if isinstance(t, str)]
+            score = len(tokens)
+        else:
+            tokens = raw_tokens
+            score = len(tokens)
+        if score > best_score:
+            best = tokens
+            best_score = score
+    return best
+
+
+def _extract_onnx_joint_action_keys(policy_path: Path) -> List[str]:
+    raw = _extract_name_list_from_onnx_bytes(policy_path, normalizer=_normalize_joint_name)
+    if not raw:
+        return []
+    out: List[str] = []
+    for key in raw:
+        if key not in out:
+            out.append(key)
+    return out
+
+
+def _extract_onnx_policy_terms(policy_path: Path) -> List[str]:
+    allowed = {"actions", "base_ang_vel", "base_lin_vel", "command", "joint_pos", "joint_vel", "projected_gravity"}
+    terms = _extract_name_list_from_onnx_bytes(policy_path, allowed_terms=allowed)
+    out: List[str] = []
+    for t in terms:
+        if t in allowed and t not in out:
+            out.append(t)
+    return out
+
+
 def infer_agent_spec(cfg: Dict[str, Any]) -> AgentSpec:
     obs_raw = _get_first(
         cfg,
@@ -322,6 +397,64 @@ def infer_agent_spec(cfg: Dict[str, Any]) -> AgentSpec:
     if action_mode not in ("delta", "absolute"):
         action_mode = "absolute"
     action_scale = float(_get_first(cfg, keys=("action_scale", "policy.action_scale"), default=1.0))
+    clamp_ankle_to_true_limits_raw = _get_first(
+        cfg,
+        keys=(
+            "clamp_ankle_to_true_limits",
+            "policy.clamp_ankle_to_true_limits",
+            "clamp_ankle_to_limits",
+            "policy.clamp_ankle_to_limits",
+        ),
+        default=False,
+    )
+    if isinstance(clamp_ankle_to_true_limits_raw, str):
+        clamp_ankle_to_true_limits = clamp_ankle_to_true_limits_raw.strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+    else:
+        clamp_ankle_to_true_limits = bool(clamp_ankle_to_true_limits_raw)
+    ankle_action_abs_limit_raw = _get_first(
+        cfg,
+        keys=(
+            "ankle_action_abs_limit",
+            "policy.ankle_action_abs_limit",
+            "action.ankle_action_abs_limit",
+            "policy.action.ankle_action_abs_limit",
+        ),
+        default=None,
+    )
+    ankle_action_abs_limit = None
+    if ankle_action_abs_limit_raw is not None:
+        try:
+            ankle_action_abs_limit = abs(float(ankle_action_abs_limit_raw))
+        except Exception:
+            ankle_action_abs_limit = None
+
+    joint_vel_source = str(
+        _get_first(
+            cfg,
+            keys=(
+                "joint_vel_source",
+                "policy.joint_vel_source",
+                "observation.joint_vel_source",
+                "observations.joint_vel_source",
+            ),
+            default="snapshot",
+        )
+    ).strip().lower()
+    joint_vel_source_alias = {
+        "fd": "finite_diff",
+        "finite_difference": "finite_diff",
+        "finite_differences": "finite_diff",
+        "joint_state": "snapshot",
+        "joint_state_fd_fallback": "auto",
+    }
+    joint_vel_source = joint_vel_source_alias.get(joint_vel_source, joint_vel_source)
+    if joint_vel_source not in ("snapshot", "finite_diff", "auto"):
+        joint_vel_source = "snapshot"
 
     action_scales = _extract_action_scales(cfg, action_keys)
 
@@ -332,6 +465,9 @@ def infer_agent_spec(cfg: Dict[str, Any]) -> AgentSpec:
         inference_hz=max(1.0, inference_hz),
         action_mode=action_mode,
         action_scale=action_scale,
+        ankle_action_abs_limit=ankle_action_abs_limit,
+        clamp_ankle_to_true_limits=clamp_ankle_to_true_limits,
+        joint_vel_source=joint_vel_source,
         policy_terms=policy_terms,
         action_scales_rad=action_scales,
     )
@@ -410,11 +546,11 @@ class PolicyWrapper:
         return self._onnx_input_dim
 
     def infer(self, obs: np.ndarray) -> np.ndarray:
-        x = np.asarray(obs, dtype=np.float32).reshape(1, -1)
+        x = _sanitize_f32_vector(obs).reshape(1, -1)
 
         if self._onnx_session is not None:
             out = self._onnx_session.run([self._onnx_output_name], {self._onnx_input_name: x})[0]
-            return np.asarray(out, dtype=np.float32).reshape(-1)
+            return _sanitize_f32_vector(out)
 
         if self._torch is not None and hasattr(self.policy, "__call__"):
             with self._torch.no_grad():
@@ -424,17 +560,17 @@ class PolicyWrapper:
                     out = out[0]
                 if hasattr(out, "detach"):
                     out = out.detach().cpu().numpy()
-                return np.asarray(out, dtype=np.float32).reshape(-1)
+                return _sanitize_f32_vector(out)
 
         if hasattr(self.policy, "predict"):
             out = self.policy.predict(x)
-            return np.asarray(out, dtype=np.float32).reshape(-1)
+            return _sanitize_f32_vector(out)
         if hasattr(self.policy, "act"):
             out = self.policy.act(x)
-            return np.asarray(out, dtype=np.float32).reshape(-1)
+            return _sanitize_f32_vector(out)
         if callable(self.policy):
             out = self.policy(x)
-            return np.asarray(out, dtype=np.float32).reshape(-1)
+            return _sanitize_f32_vector(out)
 
         raise RuntimeError("Policy object has no supported inference method.")
 
@@ -502,6 +638,23 @@ def _quat_xyzw_to_rotmat(q_xyzw: Sequence[float]) -> np.ndarray:
     )
 
 
+def _sanitize_f32_vector(x: Any) -> np.ndarray:
+    arr = np.asarray(x, dtype=np.float32).reshape(-1)
+    return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _ankle_cfg_for_side(side: str) -> Dict[str, Any]:
+    return ANKLE_COUPLING_CALIBRATION_LEFT if side == "left" else ANKLE_COUPLING_CALIBRATION_RIGHT
+
+
+def _clamp_within_interval(value: float, lo: float, hi: float) -> float:
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        return float(value)
+    if lo > hi:
+        lo, hi = hi, lo
+    return float(np.clip(float(value), float(lo), float(hi)))
+
+
 @dataclass
 class RLAgent:
     robot: BipedalRobotController
@@ -517,19 +670,251 @@ class RLAgent:
     _prev_q_rad: Optional[np.ndarray] = field(default=None, init=False)
     _prev_q_t_s: Optional[float] = field(default=None, init=False)
     _command_twist: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float32), init=False)
+    _command_source: Optional[Any] = field(default=None, init=False)
+    _warn_last_t_s: Dict[str, float] = field(default_factory=dict, init=False)
+    _warn_counts: Dict[str, int] = field(default_factory=dict, init=False)
+    _warn_interval_s: float = field(default=1.0, init=False)
+    _log_obs: bool = field(default=False, init=False)
+    _log_action: bool = field(default=False, init=False)
+    _log_every_n: int = field(default=1, init=False)
+    _log_path: Optional[Path] = field(default=None, init=False)
+    _log_file: Optional[Any] = field(default=None, init=False)
+    _log_writer: Optional[Any] = field(default=None, init=False)
+    _log_step_idx: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         self.obs_history = deque(maxlen=int(self.spec.history_len))
 
+    def _snapshot_has_valid_joint_state(self, snapshot: Dict[str, Any]) -> bool:
+        motors = snapshot.get("motors")
+        if not isinstance(motors, dict) or not motors:
+            return False
+        for mid in JOINT_KEY_TO_MOTOR_ID.values():
+            st = motors.get(mid, motors.get(str(mid)))
+            if not isinstance(st, dict):
+                return False
+            try:
+                if float(st.get("stamp", 0.0)) <= 0.0:
+                    return False
+            except Exception:
+                return False
+        return True
+
+    def _clamp_ankles_to_true_limits(self, q_cmd_deg: np.ndarray) -> np.ndarray:
+        if not bool(self.spec.clamp_ankle_to_true_limits):
+            return q_cmd_deg
+        limits = getattr(self.robot, "command_limits_cal_deg", None)
+        if not isinstance(limits, dict):
+            return q_cmd_deg
+        q = np.asarray(q_cmd_deg, dtype=np.float32).copy()
+        for side_name, pitch_idx, roll_idx, a1_mid, a2_mid in (
+            ("left", 4, 5, 5, 6),
+            ("right", 10, 11, 11, 12),
+        ):
+            lim1 = limits.get(a1_mid)
+            lim2 = limits.get(a2_mid)
+            if lim1 is None or lim2 is None:
+                continue
+            a1_lo, a1_hi = float(min(lim1)), float(max(lim1))
+            a2_lo, a2_hi = float(min(lim2)), float(max(lim2))
+            # Match the controller's safe command margin so agent-side clamp is consistent.
+            # Stay slightly inside the controller's accepted interval to avoid
+            # edge-case rejects from float rounding at the exact boundary.
+            extra_eps = float(ANKLE_TRUE_LIMIT_CLAMP_EPS_DEG)
+            a1_lo += float(COMMAND_MARGIN_DEG) + extra_eps
+            a1_hi -= float(COMMAND_MARGIN_DEG) + extra_eps
+            a2_lo += float(COMMAND_MARGIN_DEG) + extra_eps
+            a2_hi -= float(COMMAND_MARGIN_DEG) + extra_eps
+            if a1_lo > a1_hi:
+                a1_lo, a1_hi = float(min(lim1)), float(max(lim1))
+            if a2_lo > a2_hi:
+                a2_lo, a2_hi = float(min(lim2)), float(max(lim2))
+
+            cfg = _ankle_cfg_for_side(side_name)
+            sign_p = float(cfg["pitch"]["sign"])
+            off_p = float(cfg["pitch"]["offset_deg"])
+            sign_r = float(cfg["roll"]["sign"])
+            off_r = float(cfg["roll"]["offset_deg"])
+
+            p = float(q[pitch_idx])
+            r = float(q[roll_idx])
+            p_lin = (p - off_p) / sign_p
+            r_lin = (r - off_r) / sign_r
+
+            # Clamp pitch while holding roll fixed.
+            p_lin_lo = max(a1_lo - r_lin, r_lin - a2_hi)
+            p_lin_hi = min(a1_hi - r_lin, r_lin - a2_lo)
+            if p_lin_lo <= p_lin_hi:
+                p_lin = _clamp_within_interval(p_lin, p_lin_lo, p_lin_hi)
+                p = sign_p * p_lin + off_p
+
+            # Clamp roll while holding (possibly updated) pitch fixed.
+            p_lin = (p - off_p) / sign_p
+            r_lin_lo = max(a1_lo - p_lin, a2_lo + p_lin)
+            r_lin_hi = min(a1_hi - p_lin, a2_hi + p_lin)
+            if r_lin_lo <= r_lin_hi:
+                r_lin = _clamp_within_interval(r_lin, r_lin_lo, r_lin_hi)
+                r = sign_r * r_lin + off_r
+
+            # Final projection pass on pitch to account for updated roll.
+            r_lin = (r - off_r) / sign_r
+            p_lin_lo = max(a1_lo - r_lin, r_lin - a2_hi)
+            p_lin_hi = min(a1_hi - r_lin, r_lin - a2_lo)
+            if p_lin_lo <= p_lin_hi:
+                p_lin = _clamp_within_interval((p - off_p) / sign_p, p_lin_lo, p_lin_hi)
+                p = sign_p * p_lin + off_p
+
+            if abs(p - float(q[pitch_idx])) > 1e-6 or abs(r - float(q[roll_idx])) > 1e-6:
+                self._warn(
+                    "ankle_joint_limit_clamped",
+                    (
+                        f"{side_name} ankle cmd clamped "
+                        f"pitch {float(q[pitch_idx]):.2f}->{p:.2f} deg, "
+                        f"roll {float(q[roll_idx]):.2f}->{r:.2f} deg"
+                    ),
+                )
+            q[pitch_idx] = p
+            q[roll_idx] = r
+        return q
+
+    def _warn(self, key: str, message: str) -> None:
+        now = time.time()
+        count = int(self._warn_counts.get(key, 0)) + 1
+        self._warn_counts[key] = count
+        last_t = float(self._warn_last_t_s.get(key, 0.0))
+        if (now - last_t) < float(self._warn_interval_s):
+            return
+        self._warn_last_t_s[key] = now
+        print(f"[RLAgent][WARN][{key}] {message} (count={count})")
+
     @classmethod
-    def from_files(cls, robot: BipedalRobotController, config_path: str, policy_path: str) -> "RLAgent":
+    def from_files(
+        cls,
+        robot: BipedalRobotController,
+        config_path: str,
+        policy_path: str,
+        *,
+        log_path: Optional[str] = None,
+        log_observation: bool = False,
+        log_action: bool = False,
+        log_every_n: int = 1,
+        ankle_action_abs_limit: Optional[float] = None,
+        clamp_ankle_to_true_limits: Optional[bool] = None,
+    ) -> "RLAgent":
         cfg = _load_config(Path(config_path))
         spec = infer_agent_spec(cfg)
-        policy = PolicyWrapper.load(Path(policy_path), cfg)
-        return cls(robot=robot, spec=spec, policy=policy)
+        ppath = Path(policy_path)
+
+        # Prefer model-embedded ordering when available. This avoids action/obs
+        # permutation bugs between exported policy and YAML dict key order.
+        onnx_action_keys = _extract_onnx_joint_action_keys(ppath)
+        if onnx_action_keys:
+            spec.action_keys = onnx_action_keys
+            spec.action_scales_rad = _extract_action_scales(cfg, spec.action_keys)
+        onnx_terms = _extract_onnx_policy_terms(ppath)
+        if len(onnx_terms) >= len(spec.policy_terms):
+            spec.policy_terms = onnx_terms
+        if ankle_action_abs_limit is not None:
+            spec.ankle_action_abs_limit = abs(float(ankle_action_abs_limit))
+        if clamp_ankle_to_true_limits is not None:
+            spec.clamp_ankle_to_true_limits = bool(clamp_ankle_to_true_limits)
+
+        policy = PolicyWrapper.load(ppath, cfg)
+        agent = cls(robot=robot, spec=spec, policy=policy)
+        if log_observation or log_action:
+            resolved_log_path = Path(log_path) if log_path else Path("rl_agent_debug_log.csv")
+            agent.configure_logging(
+                log_path=resolved_log_path,
+                log_observation=log_observation,
+                log_action=log_action,
+                log_every_n=log_every_n,
+            )
+        return agent
+
+    def configure_logging(
+        self,
+        *,
+        log_path: Path,
+        log_observation: bool = True,
+        log_action: bool = True,
+        log_every_n: int = 1,
+    ) -> None:
+        self._close_log_file()
+        self._log_obs = bool(log_observation)
+        self._log_action = bool(log_action)
+        self._log_every_n = max(1, int(log_every_n))
+        self._log_step_idx = 0
+        self._log_path = Path(log_path)
+        self._log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        f = self._log_path.open("w", newline="")
+        writer = csv.writer(f)
+        # `action_pre_scale` is the direct policy output before action_scale/joint scaling.
+        writer.writerow(["time_s", "step", "observation", "action_pre_scale"])
+        f.flush()
+        self._log_file = f
+        self._log_writer = writer
+        print(
+            f"[RLAgent] logging enabled path={self._log_path} "
+            f"(obs={self._log_obs}, action={self._log_action}, every_n={self._log_every_n})"
+        )
+
+    def disable_logging(self) -> None:
+        self._log_obs = False
+        self._log_action = False
+        self._close_log_file()
+
+    def _close_log_file(self) -> None:
+        if self._log_file is not None:
+            try:
+                self._log_file.flush()
+                self._log_file.close()
+            except Exception:
+                pass
+        self._log_file = None
+        self._log_writer = None
+        self._log_path = None
+
+    def _maybe_log_step(self, obs: np.ndarray, action_pre_scale: np.ndarray) -> None:
+        if self._log_writer is None or self._log_file is None:
+            return
+        self._log_step_idx += 1
+        if (self._log_step_idx % self._log_every_n) != 0:
+            return
+        obs_payload = ""
+        action_payload = ""
+        if self._log_obs:
+            obs_payload = json.dumps(np.asarray(obs, dtype=np.float32).reshape(-1).tolist(), separators=(",", ":"))
+        if self._log_action:
+            action_payload = json.dumps(
+                np.asarray(action_pre_scale, dtype=np.float32).reshape(-1).tolist(), separators=(",", ":")
+            )
+        self._log_writer.writerow([f"{time.time():.6f}", str(self._log_step_idx), obs_payload, action_payload])
+        self._log_file.flush()
 
     def set_command_twist(self, lin_x: float, lin_y: float, yaw_rate: float) -> None:
         self._command_twist = np.array([float(lin_x), float(lin_y), float(yaw_rate)], dtype=np.float32)
+
+    def set_command_source(self, source: Optional[Any]) -> None:
+        """
+        Attach external command source with method:
+          - get_command_twist() -> (lin_x, lin_y, yaw_rate)
+        """
+        self._command_source = source
+
+    def _refresh_command_from_source(self) -> None:
+        src = self._command_source
+        if src is None:
+            return
+        getter = getattr(src, "get_command_twist", None)
+        if getter is None or not callable(getter):
+            self._warn("cmd_source_invalid", "command source has no callable get_command_twist()")
+            return
+        cmd = getter()
+        if not isinstance(cmd, (list, tuple, np.ndarray)) or len(cmd) < 3:
+            self._warn("cmd_source_bad_value", f"command source returned invalid value type={type(cmd).__name__}")
+            return
+        self.set_command_twist(float(cmd[0]), float(cmd[1]), float(cmd[2]))
 
     def apply_model_gains_from_mjcf(self, mjcf_path: str) -> Dict[str, float]:
         """
@@ -639,6 +1024,7 @@ class RLAgent:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
         self._thread = None
+        self._close_log_file()
 
     def get_debug_state(self) -> Dict[str, Any]:
         return {
@@ -646,45 +1032,98 @@ class RLAgent:
             "history_size": int(len(self.obs_history)),
             "history_len": int(self.spec.history_len),
             "inference_hz": float(self.spec.inference_hz),
+            "command_twist": [float(v) for v in self._command_twist.tolist()],
+            "command_source_attached": bool(self._command_source is not None),
             "action_mode": str(self.spec.action_mode),
+            "joint_vel_source": str(self.spec.joint_vel_source),
             "obs_dim": int(self._last_obs.size) if self._last_obs is not None else 0,
             "action_dim": int(self._last_action.size) if self._last_action is not None else 0,
             "policy_terms": list(self.spec.policy_terms),
+            "warn_counts": dict(self._warn_counts),
         }
 
     def _term_observation_vector(self, snapshot: Dict[str, Any], term_name: str) -> np.ndarray:
-        q_deg = np.asarray(snapshot.get("joint_state_deg", [0.0] * 12), dtype=np.float32)
+        q_raw = np.asarray(snapshot.get("joint_state_deg", [0.0] * 12), dtype=np.float32).reshape(-1)
+        bad_q = np.where(~np.isfinite(q_raw))[0]
+        if bad_q.size:
+            self._warn("joint_state_nonfinite", f"joint_state_deg has non-finite at idx={bad_q.tolist()[:6]}")
+        q_deg = _sanitize_f32_vector(q_raw)
+        if q_deg.size < 12:
+            q_deg = np.pad(q_deg, (0, 12 - q_deg.size))
         q_rad = np.deg2rad(q_deg)
+        q_rad = _sanitize_f32_vector(q_rad)
+
+        if self._default_joint_pos_rad is None and self._snapshot_has_valid_joint_state(snapshot):
+            self._default_joint_pos_rad = q_rad.copy()
 
         now_s = float(snapshot.get("time_s", time.time()))
-        if self._prev_q_rad is None or self._prev_q_t_s is None or now_s <= self._prev_q_t_s:
-            qd_rad_s = np.zeros_like(q_rad)
-        else:
+        qd_snap = np.asarray(snapshot.get("joint_velocity_rad_s", []), dtype=np.float32).reshape(-1)
+        qd_fd_available = self._prev_q_rad is not None and self._prev_q_t_s is not None and now_s > self._prev_q_t_s
+        if qd_fd_available:
             dt = max(1e-4, now_s - self._prev_q_t_s)
-            qd_rad_s = (q_rad - self._prev_q_rad) / dt
+            qd_fd = _sanitize_f32_vector((q_rad - self._prev_q_rad) / dt)
+        else:
+            qd_fd = np.zeros_like(q_rad)
+        qd_snap_ok = qd_snap.size >= 12
+        qd_snap_vec = _sanitize_f32_vector(qd_snap[:12]) if qd_snap_ok else np.zeros_like(q_rad)
+
+        joint_vel_source = str(getattr(self.spec, "joint_vel_source", "snapshot") or "snapshot").strip().lower()
+        if joint_vel_source == "finite_diff":
+            qd_rad_s = qd_fd
+        elif joint_vel_source == "auto":
+            qd_rad_s = qd_snap_vec if qd_snap_ok else qd_fd
+        else:
+            qd_rad_s = qd_snap_vec if qd_snap_ok else qd_fd
 
         if term_name == "actions":
             return self._last_policy_action.copy()
         if term_name == "base_ang_vel":
             imu = snapshot.get("imu") or {}
-            gyro = imu.get("gyro_rads") if isinstance(imu, dict) else None
+            gyro = None
+            if isinstance(imu, dict):
+                gyro = imu.get("gyro_rads")
+                if gyro is None:
+                    gyro = imu.get("ang_vel_rad_s")
             if isinstance(gyro, (list, tuple)) and len(gyro) >= 3:
-                return np.array([float(gyro[0]), float(gyro[1]), float(gyro[2])], dtype=np.float32)
+                g_raw = np.asarray([float(gyro[0]), float(gyro[1]), float(gyro[2])], dtype=np.float32)
+                if not np.all(np.isfinite(g_raw)):
+                    self._warn("imu_gyro_nonfinite", f"imu gyro contains non-finite values={g_raw.tolist()}")
+                return _sanitize_f32_vector([float(gyro[0]), float(gyro[1]), float(gyro[2])])
             return np.zeros(3, dtype=np.float32)
         if term_name == "base_lin_vel":
+            imu = snapshot.get("imu") or {}
+            lin_vel = None
+            if isinstance(imu, dict):
+                lin_vel = imu.get("linear_velocity_mps")
+                if lin_vel is None:
+                    lin_vel = imu.get("lin_vel_m_s")
+            if isinstance(lin_vel, (list, tuple)) and len(lin_vel) >= 3:
+                v_raw = np.asarray([float(lin_vel[0]), float(lin_vel[1]), float(lin_vel[2])], dtype=np.float32)
+                if not np.all(np.isfinite(v_raw)):
+                    self._warn("imu_linvel_nonfinite", f"imu linear velocity contains non-finite values={v_raw.tolist()}")
+                return _sanitize_f32_vector([float(lin_vel[0]), float(lin_vel[1]), float(lin_vel[2])])
             return np.zeros(3, dtype=np.float32)
         if term_name == "command":
-            return self._command_twist.copy()
+            return _sanitize_f32_vector(self._command_twist)
         if term_name == "joint_pos":
-            return q_rad.astype(np.float32, copy=False)
+            # Policy was trained on joint_pos_rel observations.
+            if self._default_joint_pos_rad is None:
+                return np.zeros_like(q_rad)
+            return _sanitize_f32_vector(q_rad - self._default_joint_pos_rad)
         if term_name == "joint_vel":
-            return qd_rad_s.astype(np.float32, copy=False)
+            return _sanitize_f32_vector(qd_rad_s)
         if term_name == "projected_gravity":
             q = snapshot.get("orientation_quaternion_xyzw")
             if isinstance(q, (list, tuple)) and len(q) == 4:
+                q_arr = np.asarray([float(v) for v in q], dtype=np.float32)
+                if not np.all(np.isfinite(q_arr)):
+                    self._warn("imu_quat_nonfinite", f"orientation quaternion non-finite values={q_arr.tolist()}")
+                qn = float(np.linalg.norm(q_arr))
+                if qn < 1e-8:
+                    self._warn("imu_quat_zero_norm", f"orientation quaternion near zero norm={qn:.3e}")
                 r = _quat_xyzw_to_rotmat(q)
                 g_world = np.array([0.0, 0.0, -1.0], dtype=np.float32)
-                return (r.T @ g_world).astype(np.float32)
+                return _sanitize_f32_vector(r.T @ g_world)
             return np.array([0.0, 0.0, -1.0], dtype=np.float32)
 
         # Unimplemented term -> zero-length contribution.
@@ -699,12 +1138,20 @@ class RLAgent:
         else:
             values = [_extract_from_snapshot(snapshot, key) for key in self.spec.obs_keys]
             obs = np.asarray(values, dtype=np.float32)
+        bad_obs = np.where(~np.isfinite(np.asarray(obs, dtype=np.float32).reshape(-1)))[0]
+        if bad_obs.size:
+            self._warn("obs_nonfinite", f"observation vector contains non-finite at idx={bad_obs.tolist()[:8]}")
 
-        q_deg = np.asarray(snapshot.get("joint_state_deg", [0.0] * 12), dtype=np.float32)
+        q_deg = _sanitize_f32_vector(snapshot.get("joint_state_deg", [0.0] * 12))
+        if q_deg.size < 12:
+            q_deg = np.pad(q_deg, (0, 12 - q_deg.size))
         q_rad = np.deg2rad(q_deg)
+        q_rad = _sanitize_f32_vector(q_rad)
+        if self._default_joint_pos_rad is None and self._snapshot_has_valid_joint_state(snapshot):
+            self._default_joint_pos_rad = q_rad.copy()
         self._prev_q_rad = q_rad
         self._prev_q_t_s = float(snapshot.get("time_s", time.time()))
-        return obs
+        return _sanitize_f32_vector(obs)
 
     def _build_history_obs(self, obs_now: np.ndarray) -> np.ndarray:
         self.obs_history.append(obs_now)
@@ -727,7 +1174,15 @@ class RLAgent:
         return out
 
     def _apply_action(self, action_vec: np.ndarray) -> None:
-        act = np.asarray(action_vec, dtype=np.float32).reshape(-1)
+        act_raw = np.asarray(action_vec, dtype=np.float32).reshape(-1)
+        bad_act = np.where(~np.isfinite(act_raw))[0]
+        if bad_act.size:
+            self._warn("action_nonfinite", f"policy action has non-finite at idx={bad_act.tolist()[:8]}")
+        act = _sanitize_f32_vector(act_raw)
+        if act.size > 0:
+            max_abs = float(np.max(np.abs(act)))
+            if max_abs > 5.0:
+                self._warn("action_large", f"policy action abs max={max_abs:.3f} (>5.0)")
         n = min(len(self.spec.action_keys), int(act.size))
         if n <= 0:
             return
@@ -737,10 +1192,13 @@ class RLAgent:
         self._last_policy_action[:] = act[:n]
 
         snapshot = self.robot.get_combined_state_snapshot(include_joint_state=True)
-        q_cur_deg = np.asarray(snapshot.get("joint_state_deg", [0.0] * 12), dtype=np.float32).reshape(-1)
+        if not self._snapshot_has_valid_joint_state(snapshot):
+            self._warn("action_wait_state", "skipping action apply until valid motor state snapshot is available")
+            return
+        q_cur_deg = _sanitize_f32_vector(snapshot.get("joint_state_deg", [0.0] * 12))
         if q_cur_deg.size < 12:
             q_cur_deg = np.pad(q_cur_deg, (0, 12 - q_cur_deg.size))
-        q_cur_rad = np.deg2rad(q_cur_deg)
+        q_cur_rad = _sanitize_f32_vector(np.deg2rad(q_cur_deg))
 
         if self._default_joint_pos_rad is None:
             self._default_joint_pos_rad = q_cur_rad.copy()
@@ -754,13 +1212,34 @@ class RLAgent:
                 continue
             idx = default_keys.index(key)
             scale_i = float(self.spec.action_scales_rad[i]) if i < len(self.spec.action_scales_rad) else 1.0
-            value_rad = float(act[i]) * scale_i * float(self.spec.action_scale)
+            act_i = float(act[i])
+            ankle_lim = self.spec.ankle_action_abs_limit
+            if (
+                ankle_lim is not None
+                and ankle_lim > 0.0
+                and (key.endswith("ankle_pitch") or key.endswith("ankle_roll"))
+            ):
+                clipped = float(np.clip(act_i, -ankle_lim, ankle_lim))
+                if clipped != act_i:
+                    self._warn(
+                        "ankle_action_clamped",
+                        f"{key} policy action {act_i:.3f} clamped to {clipped:.3f} (limit={ankle_lim:.3f})",
+                    )
+                act_i = clipped
+            value_rad = act_i * scale_i * float(self.spec.action_scale)
+            if not np.isfinite(value_rad):
+                continue
             if self.spec.action_mode == "delta":
                 q_cmd_rad[idx] = q_cur_rad[idx] + value_rad
             else:
                 q_cmd_rad[idx] = self._default_joint_pos_rad[idx] + value_rad
 
-        q_cmd_deg = np.rad2deg(q_cmd_rad)
+        q_cmd_deg = _sanitize_f32_vector(np.rad2deg(q_cmd_rad))
+        q_cmd_deg = self._clamp_ankles_to_true_limits(q_cmd_deg)
+        dq_cmd_deg = q_cmd_deg - q_cur_deg[: q_cmd_deg.size]
+        max_step = float(np.max(np.abs(dq_cmd_deg))) if dq_cmd_deg.size else 0.0
+        if max_step > 60.0:
+            self._warn("command_step_large", f"joint command step abs max={max_step:.2f} deg")
         left, right = _joint_array_to_command(q_cmd_deg)
         self.robot.set_action(left=left, right=right)
 
@@ -768,14 +1247,19 @@ class RLAgent:
         period = 1.0 / float(self.spec.inference_hz)
         next_tick = time.perf_counter()
         while self._running:
-            obs_now = self._build_obs_now()
-            obs_hist = self._build_history_obs(obs_now)
-            obs_in = self._adapt_obs_dim_for_policy(obs_hist)
-            action = self.policy.infer(obs_in)
+            try:
+                self._refresh_command_from_source()
+                obs_now = self._build_obs_now()
+                obs_hist = self._build_history_obs(obs_now)
+                obs_in = self._adapt_obs_dim_for_policy(obs_hist)
+                action = self.policy.infer(obs_in)
 
-            self._last_obs = obs_in
-            self._last_action = action
-            self._apply_action(action)
+                self._last_obs = obs_in
+                self._last_action = action
+                self._maybe_log_step(obs_in, action)
+                self._apply_action(action)
+            except Exception as exc:
+                self._warn("loop_exception", f"run loop exception: {type(exc).__name__}: {exc}")
 
             next_tick += period
             sleep_s = next_tick - time.perf_counter()
@@ -792,12 +1276,24 @@ def _main() -> None:
     parser.add_argument("--mjcf", type=str, default=None, help="Optional MJCF robot.xml path to import actuator gains.")
     parser.add_argument("--inference-hz", type=float, default=None, help="Override inference frequency.")
     parser.add_argument("--mode", type=str, default="control", choices=("control", "state_only"))
+    parser.add_argument("--log-path", type=str, default=None, help="Optional CSV path for debug logging.")
+    parser.add_argument("--log-observation", action="store_true", help="Log policy observation vectors.")
+    parser.add_argument("--log-action", action="store_true", help="Log policy action vectors.")
+    parser.add_argument("--log-every-n", type=int, default=1, help="Log every N inference steps.")
     args = parser.parse_args()
 
     cfg = _load_config(Path(args.config))
     imu = _build_imu_from_config(cfg)
     robot = BipedalRobotController(control_hz=100.0, imu=imu)
-    agent = RLAgent.from_files(robot, args.config, args.policy)
+    agent = RLAgent.from_files(
+        robot,
+        args.config,
+        args.policy,
+        log_path=args.log_path,
+        log_observation=bool(args.log_observation),
+        log_action=bool(args.log_action),
+        log_every_n=max(1, int(args.log_every_n)),
+    )
     mjcf_path = args.mjcf
     if mjcf_path is None:
         # Convenient default for your current repo layout.
