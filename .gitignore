@@ -223,3 +223,11 @@ logs/
 *.bag
 *.mp4
 *.npz
+
+# Real-robot generated artifacts
+to_real_robot/log_backups/
+# to_real_robot/RL_policy/*.onnx
+to_real_robot/policy.onnx
+to_real_robot/RL_policy/real_robot_debug_*.csv
+to_real_robot/RL_policy/real_robot_debug_*.png
+to_real_robot/joint_velocity_fd_vs_maintained*.svg
