@@ -120,9 +120,6 @@ agent = RLAgent.from_files(
     policy_path="RL_policy/2026-02-22_21-51-53.onnx",
 )
 
-# optional: load gains from RL mjcf
-agent.apply_model_gains_from_mjcf("RL_policy/robot.xml")
-
 # safety scaling (start small)
 agent.spec.action_scale = 0.002
 
@@ -153,8 +150,8 @@ pad.connect()  # or pad.connect(device_path="/dev/input/eventX")
 pad.start()
 
 # 3) Quick manual test (move sticks)
-while True:
-    print("twist:", pad.get_command_twist())
+# while True:
+#     print("twist:", pad.get_command_twist())
     # time.sleep(0.1)
 
 # 4) Link to RL agent command channel
@@ -241,6 +238,132 @@ agent.spec.action_scale = 0.1
 
 # optional command
 agent.set_command_twist(0.0, 0.0, 0.0)
-agent.spec.joint_vel_source = "auto"
+agent.spec.joint_vel_source = "finite_difference"  # or "robot_state_estimation"
 agent.set_command_source(pad)
 agent.start()
+
+
+## sim
+
+import importlib, sim_robot
+importlib.reload(sim_robot)
+from sim_robot import SimBipedalRobotController
+from RL_agent import RLAgent
+
+robot = SimBipedalRobotController(control_hz=200.0)   # now uses scene.xml
+robot.start(mode="control", auto_enable=True)
+robot.start_viewer()  # open MuJoCo window
+
+agent = RLAgent.from_files(
+    robot,
+    config_path="RL_policy/config.yaml",
+    policy_path="RL_policy/2026-02-26_06-32-06.onnx",
+)
+agent.spec.action_scale = 1   # start lower while debugging
+agent.start()
+
+
+
+import importlib, sim_robot, RL_agent
+importlib.reload(sim_robot)
+importlib.reload(RL_agent)
+
+from sim_robot import SimBipedalRobotController
+from RL_agent import RLAgent
+
+robot = SimBipedalRobotController(control_hz=200.0)  # now uses sim_scene_safe.xml
+robot.enable_debug_trace("RL_policy/sim_robot_trace.csv", every_n=1)
+
+robot.start(mode="control", auto_enable=True)
+robot.start_viewer()
+robot.set_action(left={"hipz": -0.0, "hipx": 0, "hipy": 0.0, "knee": 0, "ankle_pitch": 0, "ankle_roll": 0.0},right={"hipz": 0.0, "hipx": 0, "hipy": -0.0, "knee": 0.0, "ankle_pitch": 0.0, "ankle_roll": 0.},)
+
+agent = RLAgent.from_files(
+    robot,
+    config_path="RL_policy/config.yaml",
+    policy_path="RL_policy/2026-02-26_20-56-19.onnx",
+    log_path="RL_policy/sim_robot_debug_ctrl.csv",  # optional
+    clamp_ankle_to_true_limits=False,
+    log_observation=True,                       # optional
+    log_action=True,                            # optional
+    log_every_n=1,                              # optional
+)
+
+agent.spec.action_scale = 1
+agent.start()
+
+
+from sim_robot import SimBipedalRobotController
+
+robot = SimBipedalRobotController(control_hz=200.0, fixed_base=False)
+robot.start(mode="control", auto_enable=True)
+robot.start_viewer()
+
+
+robot.set_action(
+left={
+    "hipz": 0.0,
+    "hipx": 0.0,
+    "hipy": -20.0535,
+    "knee": 40.1070,
+    "ankle_pitch": -20.0535,  # from ankley_left
+    "ankle_roll": 0.0,        # from anklex_left
+},
+right={
+    "hipz": 0.0,
+    "hipx": 0.0,
+    "hipy": 20.0535,
+    "knee": 40.1070,
+    "ankle_pitch": 20.0535,   # from ankley_right
+    "ankle_roll": 0.0,        # from anklex_right
+},
+)
+
+
+### Isolated RL agent (same usage style) + gamepad command source
+
+from RL_agent_isolated import RLAgent
+from gamepad_controller import GamepadController
+from sim_robot import SimBipedalRobotController
+import importlib, sim_robot
+importlib.reload(sim_robot)
+from sim_robot import SimBipedalRobotController
+import warnings, glfw
+warnings.filterwarnings("ignore", category=glfw.GLFWError)
+
+robot = SimBipedalRobotController(control_hz=200.0, fixed_base=False)
+robot.start(mode="control", auto_enable=True)
+robot.start_viewer()
+print("debug logs:", robot._debug_action_logs)  # should be False
+
+pad = GamepadController(
+    name_substring="8bitdo",
+    deadzone=0.12,
+    max_lin_x=0.75,
+    max_lin_y=0.5,
+    max_yaw_rate=0.8,
+)
+pad.connect()
+pad.start()
+
+agent = RLAgent.from_files(
+    robot,
+    config_path="RL_policy/config.yaml",
+    policy_path="RL_policy/2026-03-01_08-33-51.onnx",
+    log_path="RL_policy/isolated_debug_ctrl.csv",
+    log_observation=True,
+    log_action=True,
+    log_every_n=1,
+)
+
+# manual global scaling remains available
+agent.spec.action_scale = 1
+
+# pad provides (lin_x, lin_y, yaw_rate) commands
+agent.set_command_source(pad)
+agent.start()
+import time
+for _ in range(50):
+    q = robot._read_joint_q_deg()
+    robot._warn_joint_state_out_of_bounds(q)
+    time.sleep(0.6)

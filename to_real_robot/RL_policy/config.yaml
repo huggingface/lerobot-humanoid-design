@@ -2,7 +2,7 @@ _wandb:
     value:
         cli_version: 0.24.0
         e:
-            ov1bf5jprtnxh060hvz30cn604svujbj:
+            3x528hu3ze8t4maf12qbk75t0ke9ndbq:
                 args:
                     - Mjlab-Velocity-Flat-LeRobot-Humanoid-no-arms
                     - --env.scene.num-envs
@@ -15,11 +15,11 @@ _wandb:
                 disk:
                     /:
                         total: "1843250438144"
-                        used: "1714732281856"
+                        used: "1721423929344"
                 email: virgile.batto@huggingface.co
                 executable: /home/virgile_batto/devel/lerobot-legged-zoo/.venv/bin/python
                 git:
-                    commit: acb0c04e1aab9c5f3695306cacce5b9a9095cd54
+                    commit: 89225c8e1262e49c4d3cdfb6a3c208e05d2f0de9
                     remote: git@github.com:Virgileboat/lerobot-legged-zoo.git
                 gpu: NVIDIA GeForce RTX 4090
                 gpu_count: 1
@@ -36,8 +36,8 @@ _wandb:
                 program: /home/virgile_batto/devel/lerobot-legged-zoo/.venv/bin/train
                 python: CPython 3.13.11
                 root: /home/virgile_batto/devel/lerobot-legged-zoo
-                startedAt: "2026-02-26T05:32:10.435102Z"
-                writerId: ov1bf5jprtnxh060hvz30cn604svujbj
+                startedAt: "2026-02-26T19:56:22.798063Z"
+                writerId: 3x528hu3ze8t4maf12qbk75t0ke9ndbq
         m: []
         python_version: 3.13.11
         t:
@@ -79,12 +79,12 @@ env_cfg:
                 offset: 0
                 preserve_order: false
                 scale:
-                    anklex_.*: 0.55
-                    ankley_.*: 0.55
-                    hipx_.*: 0.24444444444444444
-                    hipy_.*: 0.24444444444444444
-                    hipz_.*: 0.09375
-                    knee_.*: 0.24444444444444444
+                    anklex_.*: 0.18333333333333332
+                    ankley_.*: 0.18333333333333332
+                    hipx_.*: 0.2
+                    hipy_.*: 0.2
+                    hipz_.*: 0.9375
+                    knee_.*: 0.2
                 transmission_type: JOINT
                 use_default_offset: true
         commands:
@@ -102,11 +102,11 @@ env_cfg:
                         - -3.141592653589793
                         - 3.141592653589793
                     lin_vel_x:
-                        - -0.5
-                        - 0.5
+                        - -0.7
+                        - 0.7
                     lin_vel_y:
-                        - -1
-                        - 1
+                        - -0.2
+                        - 0.2
                 rel_heading_envs: 0.3
                 rel_standing_envs: 0.1
                 resampling_time_range:
@@ -367,6 +367,48 @@ env_cfg:
                     velocity_range:
                         - 0
                         - 0
+            robot_weight:
+                domain_randomization: true
+                func: mjlab.envs.mdp.events.randomize_field
+                interval_range_s: null
+                is_global_time: false
+                min_step_count_between_reset: 0
+                mode: startup
+                params:
+                    asset_cfg:
+                        actuator_ids:
+                            slice_start: null
+                            slice_step: null
+                            slice_stop: null
+                        actuator_names: null
+                        body_ids:
+                            slice_start: null
+                            slice_step: null
+                            slice_stop: null
+                        body_names: null
+                        geom_ids:
+                            slice_start: null
+                            slice_step: null
+                            slice_stop: null
+                        geom_names: null
+                        joint_ids:
+                            slice_start: null
+                            slice_step: null
+                            slice_stop: null
+                        joint_names: null
+                        name: robot
+                        preserve_order: false
+                        site_ids:
+                            slice_start: null
+                            slice_step: null
+                            slice_stop: null
+                        site_names: null
+                    field: body_mass
+                    operation: scale
+                    ranges:
+                        - 0.9
+                        - 1.1
+                    shared_random: true
         is_finite_horizon: false
         observations:
             critic:
@@ -619,24 +661,6 @@ env_cfg:
                         params:
                             sensor_name: robot/imu_ang_vel
                         scale: null
-                    base_lin_vel:
-                        clip: null
-                        delay_hold_prob: 0
-                        delay_max_lag: 0
-                        delay_min_lag: 0
-                        delay_per_env: true
-                        delay_per_env_phase: true
-                        delay_update_period: 0
-                        flatten_history_dim: true
-                        func: mjlab.envs.mdp.observations.builtin_sensor
-                        history_length: 0
-                        noise:
-                            n_max: 0.15
-                            n_min: -0.15
-                            operation: add
-                        params:
-                            sensor_name: robot/imu_lin_vel
-                        scale: null
                     command:
                         clip: null
                         delay_hold_prob: 0
@@ -702,7 +726,7 @@ env_cfg:
                         scale: null
         rewards:
             action_fft_band_le_3hz_ratio:
-                func: <training_exemples.lerobot_humanoid_no_arms.env_cfgs._ActionFftBandRatioReward object at 0x7284f0a876f0>
+                func: <training_exemples.lerobot_humanoid_no_arms.env_cfgs._ActionFftBandRatioReward object at 0x7211aea57e10>
                 params:
                     cutoff_hz: 3
                     history_len: 50
@@ -737,7 +761,7 @@ env_cfg:
             ankle_torque_over_5nm_l2:
                 func: training_exemples.lerobot_humanoid_no_arms.env_cfgs._ankle_torque_above_limit_l2
                 params:
-                    limit_nm: 5
+                    limit_nm: 4
                 weight: -0.02
             body_ang_vel:
                 func: mjlab.tasks.velocity.mdp.rewards.body_angular_velocity_penalty
@@ -938,7 +962,7 @@ env_cfg:
                         .*hipz.*: 0.15
                         .*knee.*: 0.35
                     walking_threshold: 0.05
-                weight: 1
+                weight: 2
             self_collisions:
                 func: mjlab.tasks.velocity.mdp.rewards.self_collision_cost
                 params:
@@ -1004,42 +1028,42 @@ env_cfg:
                     articulation:
                         actuators:
                             - armature: 0.02
-                              damping: 2
-                              effort_limit: 15
+                              damping: 1
+                              effort_limit: 150
                               frictionloss: 0
                               stiffness: 40
                               target_names_expr:
                                 - hipz_.*
                               transmission_type: JOINT
                             - armature: 0.02
-                              damping: 2
+                              damping: 1
                               effort_limit: 88
                               frictionloss: 0
-                              stiffness: 90
+                              stiffness: 110
                               target_names_expr:
                                 - hipx_.*
                               transmission_type: JOINT
                             - armature: 0.02
-                              damping: 2
+                              damping: 1
                               effort_limit: 88
                               frictionloss: 0
-                              stiffness: 90
+                              stiffness: 110
                               target_names_expr:
                                 - hipy_.*
                               transmission_type: JOINT
                             - armature: 0.015
-                              damping: 2
+                              damping: 1
                               effort_limit: 88
                               frictionloss: 0
-                              stiffness: 90
+                              stiffness: 110
                               target_names_expr:
                                 - knee_.*
                               transmission_type: JOINT
                             - armature: 0.01
-                              damping: 3
+                              damping: 2
                               effort_limit: 44
                               frictionloss: 0
-                              stiffness: 20
+                              stiffness: 60
                               target_names_expr:
                                 - ankley_.*
                                 - anklex_.*
@@ -1068,7 +1092,18 @@ env_cfg:
                             - 0
                             - 0
                         joint_pos:
-                            .*: 0
+                            anklex_left: 0
+                            anklex_right: 0
+                            ankley_left: -0.35
+                            ankley_right: 0.35
+                            hipx_left: 0
+                            hipx_right: 0
+                            hipy_left: -0.35
+                            hipy_right: 0.35
+                            hipz_left: 0
+                            hipz_right: 0
+                            knee_left: 0.7
+                            knee_right: 0.7
                         joint_vel:
                             .*: 0
                         lin_vel:
@@ -1078,7 +1113,7 @@ env_cfg:
                         pos:
                             - 0
                             - 0
-                            - 0.75
+                            - 0.77
                         rot:
                             - 1
                             - 0
@@ -1194,7 +1229,7 @@ env_cfg:
             origin_type: ASSET_BODY
             width: 320
 log_dir:
-    value: logs/rsl_rl/lerobot_humanoid_no_arms_velocity/2026-02-26_06-32-06
+    value: logs/rsl_rl/lerobot_humanoid_no_arms_velocity/2026-02-26_20-56-19
 policy_cfg:
     value:
         activation: elu
