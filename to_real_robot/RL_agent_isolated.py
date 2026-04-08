@@ -56,6 +56,7 @@ class AgentSpec:
     encoder_bias_rad: List[float] = field(default_factory=list)
     obs_term_scales: Dict[str, float] = field(default_factory=dict)
     joint_vel_source: str = "auto"  # auto | finite_diff
+    debug_zero_actions_obs: bool = False
 
 
 def _load_config(path: Path) -> Dict[str, Any]:
@@ -695,6 +696,7 @@ class RLAgent:
             "history_len": int(self.spec.history_len),
             "inference_hz": float(self.spec.inference_hz),
             "joint_vel_source": str(self.spec.joint_vel_source),
+            "debug_zero_actions_obs": bool(self.spec.debug_zero_actions_obs),
             "obs_dim": int(self._last_obs.size) if self._last_obs is not None else 0,
             "action_dim": int(self._last_action.size) if self._last_action is not None else 0,
             "policy_terms": list(self.spec.policy_terms),
@@ -718,6 +720,8 @@ class RLAgent:
 
     def _term_observation_vector(self, snapshot: Dict[str, Any], term_name: str) -> np.ndarray:
         if term_name == "actions":
+            if self.spec.debug_zero_actions_obs:
+                return self._apply_obs_term_scale(term_name, np.zeros_like(self._last_policy_action, dtype=np.float32))
             return self._apply_obs_term_scale(term_name, self._last_policy_action.copy())
         if term_name == "command":
             return self._apply_obs_term_scale(term_name, self._command_twist.copy())
@@ -790,9 +794,7 @@ class RLAgent:
             tau_now = self._policy_order_joint_state(snapshot, "joint_torque_nm").astype(np.float32, copy=False)
             tau_now = self._apply_obs_term_scale(term_name, tau_now)
             self._curr_obs_joint_torque = tau_now.copy()
-            if self._prev_obs_joint_torque is None:
-                return np.zeros_like(tau_now, dtype=np.float32)
-            return self._prev_obs_joint_torque.astype(np.float32, copy=False)
+            return tau_now
         return np.zeros(0, dtype=np.float32)
 
     def _build_obs_now(self, snapshot: Dict[str, Any]) -> np.ndarray:

@@ -127,7 +127,7 @@ class JointTorqueObservationTests(unittest.TestCase):
 
         np.testing.assert_allclose(joint_tau, expected, atol=1e-6)
 
-    def test_isolated_rl_agent_uses_delayed_policy_order_joint_torque(self) -> None:
+    def test_isolated_rl_agent_uses_current_policy_order_joint_torque(self) -> None:
         agent = IsolatedRLAgent(
             robot=_DummyRobot(),
             spec=IsolatedAgentSpec(
@@ -136,17 +136,16 @@ class JointTorqueObservationTests(unittest.TestCase):
             ),
             policy=_DummyPolicy(),
         )
-        agent._prev_obs_joint_torque = np.zeros(12, dtype=np.float32)
 
         first_tau = np.arange(1, 13, dtype=np.float32)
         obs_first = agent._build_obs_now(_make_snapshot(first_tau, time_s=0.0))
         obs_second = agent._build_obs_now(_make_snapshot(np.zeros(12, dtype=np.float32), time_s=1.0))
 
-        np.testing.assert_allclose(obs_first, np.zeros(12, dtype=np.float32), atol=1e-6)
         expected_policy_order = np.array([7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5, 6], dtype=np.float32)
-        np.testing.assert_allclose(obs_second, expected_policy_order, atol=1e-6)
+        np.testing.assert_allclose(obs_first, expected_policy_order, atol=1e-6)
+        np.testing.assert_allclose(obs_second, np.zeros(12, dtype=np.float32), atol=1e-6)
 
-    def test_isolated_rl_agent_reorders_joint_pos_and_scales_delayed_joint_torque(self) -> None:
+    def test_isolated_rl_agent_reorders_joint_pos_and_scales_current_joint_torque(self) -> None:
         agent = IsolatedRLAgent(
             robot=_DummyRobot(),
             spec=IsolatedAgentSpec(
@@ -182,9 +181,9 @@ class JointTorqueObservationTests(unittest.TestCase):
         expected_tau = 0.5 * np.array([207, 208, 209, 210, 211, 212, 201, 202, 203, 204, 205, 206], dtype=np.float32)
 
         np.testing.assert_allclose(obs_first[:12], expected_pos, atol=1e-6)
-        np.testing.assert_allclose(obs_first[12:24], np.zeros(12, dtype=np.float32), atol=1e-6)
+        np.testing.assert_allclose(obs_first[12:24], expected_tau, atol=1e-6)
         np.testing.assert_allclose(obs_second[:12], expected_pos, atol=1e-6)
-        np.testing.assert_allclose(obs_second[12:24], expected_tau, atol=1e-6)
+        np.testing.assert_allclose(obs_second[12:24], np.zeros(12, dtype=np.float32), atol=1e-6)
 
     def test_isolated_rl_agent_actions_obs_uses_last_raw_policy_action(self) -> None:
         agent = IsolatedRLAgent(
@@ -206,6 +205,11 @@ class JointTorqueObservationTests(unittest.TestCase):
         agent._apply_action(raw_action)
         obs_quarter_scale = agent._term_observation_vector({}, "actions")
         np.testing.assert_allclose(obs_quarter_scale, raw_action, atol=1e-6)
+
+        agent.spec.debug_zero_actions_obs = True
+        obs_zeroed = agent._term_observation_vector({}, "actions")
+        np.testing.assert_allclose(obs_zeroed, np.zeros_like(raw_action), atol=1e-6)
+        np.testing.assert_allclose(agent._last_policy_action, raw_action, atol=1e-6)
 
     def test_main_rl_agent_uses_delayed_joint_torque(self) -> None:
         agent = MainRLAgent(
