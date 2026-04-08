@@ -32,51 +32,64 @@ except Exception:  # pragma: no cover - optional runtime dependency
 
 DEFAULT_MJCF_PATH = Path("bipedal_plateform_no_arms/mjcf/sim_scene_safe.xml")
 
-# Mirrors gains and init pose from:
-# bipedal_plateform_no_arms/mjcf/lerobot_humanoid_no_arms_constants.py
-LEROBOT_SIM_GAINS_BY_MOTOR_ID: Dict[int, tuple[float, float]] = {
-    1: (40.0, 1.0),   # hipz_left
-    2: (110.0, 1.0),  # hipx_left
-    3: (110.0, 1.0),  # hipy_left
-    4: (110.0, 1.0),  # knee_left
-    5: (60.0, 2.0),   # ankle motors
-    6: (60.0, 2.0),
-    7: (40.0, 1.0),   # hipz_right
-    8: (110.0, 1.0),  # hipx_right
-    9: (110.0, 1.0),  # hipy_right
-    10: (110.0, 1.0), # knee_right
-    11: (60.0, 2.0),  # ankle motors
-    12: (60.0, 2.0),
+# PD gains tuned for MuJoCo sim (from lerobot_humanoid_no_arms_constants.py).
+# These are higher than real-robot gains because the sim uses position actuators.
+SIM_PD_GAINS_BY_MOTOR_ID: Dict[int, tuple[float, float]] = {
+    1:  (40.0,  1.0),   # hipz_left
+    2:  (110.0, 1.0),   # hipx_left
+    3:  (110.0, 1.0),   # hipy_left
+    4:  (110.0, 1.0),   # knee_left
+    5:  (60.0,  2.0),   # ankle_a left
+    6:  (60.0,  2.0),   # ankle_b left
+    7:  (40.0,  1.0),   # hipz_right
+    8:  (110.0, 1.0),   # hipx_right
+    9:  (110.0, 1.0),   # hipy_right
+    10: (110.0, 1.0),   # knee_right
+    11: (60.0,  2.0),   # ankle_a right
+    12: (60.0,  2.0),   # ankle_b right
 }
+LEROBOT_SIM_GAINS_BY_MOTOR_ID = SIM_PD_GAINS_BY_MOTOR_ID  # backward-compat alias
 
-LEROBOT_KNEES_BENT_REF_POSE_RAD: Dict[str, float] = {
-    "hipz_right": 0.0,
-    "hipx_right": 0.0,
-    "hipy_right": 0.*float(np.deg2rad(20.0535)),
-    "knee_right": 0.*float(np.deg2rad(40.1070)),
-    "ankley_right": 0.*float(np.deg2rad(20.0535)),
+# Knees-bent standing reference pose (MuJoCo joint names).
+# Used as a stable starting configuration for RL training resets.
+SIM_KNEES_BENT_POSE_RAD: Dict[str, float] = {
+    "hipz_right":   0.0,
+    "hipx_right":   0.0,
+    "hipy_right":   float(np.deg2rad( 20.0535)),
+    "knee_right":   float(np.deg2rad( 40.1070)),
+    "ankley_right": float(np.deg2rad( 20.0535)),
     "anklex_right": 0.0,
-    "hipz_left": 0.0,
-    "hipx_left": 0.0,
-    "hipy_left": 0.*float(np.deg2rad(-20.0535)),
-    "knee_left": 0.*float(np.deg2rad(40.1070)),
-    "ankley_left": 0.*float(np.deg2rad(-20.0535)),
-    "anklex_left": 0.0,
+    "hipz_left":    0.0,
+    "hipx_left":    0.0,
+    "hipy_left":    float(np.deg2rad(-20.0535)),
+    "knee_left":    float(np.deg2rad( 40.1070)),
+    "ankley_left":  float(np.deg2rad(-20.0535)),
+    "anklex_left":  0.0,
 }
-LEROBOT_ENV_INIT_BASE_HEIGHT_M = 2.5
-MJLAB_HARDCODED_SPAWN_QPOS_FREE = np.array(
+LEROBOT_KNEES_BENT_REF_POSE_RAD = SIM_KNEES_BENT_POSE_RAD  # backward-compat alias
+
+# Drop height when spawning without a hardcoded pose (free-fall to ground).
+SIM_DROP_HEIGHT_M = 2.5
+LEROBOT_ENV_INIT_BASE_HEIGHT_M = SIM_DROP_HEIGHT_M  # backward-compat alias
+
+# Hardcoded spawn pose recorded from a stable MJLab episode.
+# qpos free-joint: [x, y, z, qw, qx, qy, qz]  (MuJoCo convention)
+SIM_SPAWN_QPOS = np.array(
     [
         0.0032666486222296953,
         2.461623626004439e-05,
-        0.77,
-        0.9996728897094727,
+        0.77,                       # z ≈ 0.77 m (standing height)
+        0.9996728897094727,         # qw ≈ 1 (nearly upright)
         6.715940253343433e-05,
         -0.02557525411248207,
         7.01636599842459e-05,
     ],
     dtype=float,
 )
-MJLAB_HARDCODED_SPAWN_QVEL_FREE = np.array(
+MJLAB_HARDCODED_SPAWN_QPOS_FREE = SIM_SPAWN_QPOS  # backward-compat alias
+
+# Corresponding free-joint velocity at spawn
+SIM_SPAWN_QVEL = np.array(
     [
         0.22695069015026093,
         0.0015118308365345001,
@@ -87,6 +100,7 @@ MJLAB_HARDCODED_SPAWN_QVEL_FREE = np.array(
     ],
     dtype=float,
 )
+MJLAB_HARDCODED_SPAWN_QVEL_FREE = SIM_SPAWN_QVEL  # backward-compat alias
 
 
 @dataclass
