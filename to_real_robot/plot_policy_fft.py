@@ -116,6 +116,7 @@ def plot_policy_fft(
     *,
     cmd_indices: Tuple[int, int, int] = (-3, -2, -1),
     max_freq_hz: float = 20.0,
+    include_command_trace: bool = True,
     out_png: Path | None = None,
 ) -> None:
     t, actions, cmd = _load_policy_csv(policy_csv, cmd_indices=cmd_indices)
@@ -126,14 +127,23 @@ def plot_policy_fft(
     fs = 1.0 / float(np.median(dt))
 
     t_rel = t - t[0]
-    fig = plt.figure(figsize=(16, 20))
-    gs = fig.add_gridspec(
-        nrows=7,
-        ncols=2,
-        height_ratios=[1, 1, 1, 1, 1, 1, 1.4],
-        hspace=0.4,
-        wspace=0.22,
-    )
+    if include_command_trace:
+        fig = plt.figure(figsize=(16, 20))
+        gs = fig.add_gridspec(
+            nrows=7,
+            ncols=2,
+            height_ratios=[1, 1, 1, 1, 1, 1, 1.4],
+            hspace=0.4,
+            wspace=0.22,
+        )
+    else:
+        fig = plt.figure(figsize=(16, 16))
+        gs = fig.add_gridspec(
+            nrows=6,
+            ncols=2,
+            hspace=0.4,
+            wspace=0.22,
+        )
     fig.suptitle(
         f"Policy Action FFT + Command Trace\nfile={policy_csv.name} | fs~{fs:.2f} Hz | N={actions.shape[0]}",
         fontsize=13,
@@ -162,15 +172,16 @@ def plot_policy_fft(
         ax_l.grid(True, alpha=0.3)
         ax_r.grid(True, alpha=0.3)
 
-    ax_cmd = fig.add_subplot(gs[6, :])
-    ax_cmd.plot(t_rel, cmd[:, 0], label="cmd_x", linewidth=1.2)
-    ax_cmd.plot(t_rel, cmd[:, 1], label="cmd_y", linewidth=1.2)
-    ax_cmd.plot(t_rel, cmd[:, 2], label="cmd_yaw", linewidth=1.2)
-    ax_cmd.set_title("Command Components Over Time (from observation)")
-    ax_cmd.set_xlabel("Time [s]")
-    ax_cmd.set_ylabel("Command")
-    ax_cmd.grid(True, alpha=0.3)
-    ax_cmd.legend(loc="upper right")
+    if include_command_trace:
+        ax_cmd = fig.add_subplot(gs[6, :])
+        ax_cmd.plot(t_rel, cmd[:, 0], label="cmd_x", linewidth=1.2)
+        ax_cmd.plot(t_rel, cmd[:, 1], label="cmd_y", linewidth=1.2)
+        ax_cmd.plot(t_rel, cmd[:, 2], label="cmd_yaw", linewidth=1.2)
+        ax_cmd.set_title("Command Components Over Time (from observation)")
+        ax_cmd.set_xlabel("Time [s]")
+        ax_cmd.set_ylabel("Command")
+        ax_cmd.grid(True, alpha=0.3)
+        ax_cmd.legend(loc="upper right")
 
     if out_png is not None:
         out_png.parent.mkdir(parents=True, exist_ok=True)
@@ -191,6 +202,11 @@ def _main() -> None:
     )
     p.add_argument("--max-freq-hz", type=float, default=20.0, help="Max frequency displayed for FFT plots.")
     p.add_argument(
+        "--only-joints",
+        action="store_true",
+        help="Plot only the 12 joint FFT subplots (no command trace).",
+    )
+    p.add_argument(
         "--out",
         type=Path,
         default=None,
@@ -206,6 +222,7 @@ def _main() -> None:
         args.policy_csv,
         cmd_indices=_parse_cmd_indices(args.cmd_indices),
         max_freq_hz=float(max(0.1, args.max_freq_hz)),
+        include_command_trace=not args.only_joints,
         out_png=out_png,
     )
 

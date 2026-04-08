@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Union
 
 import csv
+import logging
 import threading
 import time
 
@@ -47,6 +49,9 @@ except Exception:  # pragma: no cover - optional runtime dependencies
     MeshcatVisualizer = None
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass
 class JointGains:
     kp: float
@@ -64,6 +69,7 @@ class MotorCommand:
 
 class BipedalRobotController:
     MODES = ("state_only", "control")
+    RX_FLUSH_MAX_MSGS_PER_BUS = 4096
 
     def __init__(
         self,
@@ -109,6 +115,12 @@ class BipedalRobotController:
 
         self._state_lock = threading.Lock()
         self._action_lock = threading.Lock()
+        self._bus_can0_tx_lock = threading.Lock()
+        self._bus_can1_tx_lock = threading.Lock()
+        self._bus_can0_rx_lock = threading.Lock()
+        self._bus_can1_rx_lock = threading.Lock()
+        self._tx_executor: Optional[ThreadPoolExecutor] = ThreadPoolExecutor(max_workers=2, thread_name_prefix="bipedal-tx")
+        self._rx_executor: Optional[ThreadPoolExecutor] = ThreadPoolExecutor(max_workers=2, thread_name_prefix="bipedal-rx")
         self._loop_thread: Optional[threading.Thread] = None
         self._running = False
         self._estop = False
@@ -130,6 +142,7 @@ class BipedalRobotController:
         self._startup_wrap_checked = False
         self._auto_shift_limits_with_wrap = False
         self.max_cmd_delta_deg = 20.0
+        self.enforce_command_limits = True
         self._last_jump_warn_s: Dict[int, float] = {mid: 0.0 for mid in MOTOR_IDS}
         self.reset_estop_each_state_cycle = True
         self._recompute_command_limits()
@@ -326,12 +339,51 @@ class BipedalRobotController:
         }
         if include_joint_state:
             raw = {mid: float(motor_snapshot[mid]["position_deg"]) for mid in MOTOR_IDS}
+            tau_raw = {mid: float(motor_snapshot[mid]["torque_nm"]) for mid in MOTOR_IDS}
             out["joint_state_rad"] = self.motor_state_to_joint_state(raw, output_radians=True, nq=12).tolist()
             out["joint_state_deg"] = self.motor_state_to_joint_state(raw, output_radians=False, nq=12).tolist()
+            out["joint_torque_nm"] = self.motor_torque_to_joint_torque(tau_raw, nq=12).tolist()
             out["joint_velocity_deg_s"] = joint_vel_deg_s.tolist()
             out["joint_velocity_rad_s"] = joint_vel_rad_s.tolist()
             out["joint_velocity_timestamp_s"] = joint_vel_stamp_s
         return out
+
+    @staticmethod
+    def _extract_imu_vec3(imu_state: Optional[Dict[str, Any]], *keys: str) -> tuple[Optional[float], Optional[float], Optional[float]]:
+        if not isinstance(imu_state, dict):
+            return (None, None, None)
+        for key in keys:
+            raw = imu_state.get(key)
+            if isinstance(raw, (list, tuple)) and len(raw) >= 3:
+                try:
+                    return (float(raw[0]), float(raw[1]), float(raw[2]))
+                except Exception:
+                    continue
+        return (None, None, None)
+
+    @staticmethod
+    def _projected_gravity_from_quat_xyzw(
+        quat_xyzw: Optional[tuple[float, float, float, float]]
+    ) -> tuple[Optional[float], Optional[float], Optional[float]]:
+        if quat_xyzw is None or len(quat_xyzw) != 4:
+            return (None, None, None)
+        try:
+            x, y, z, w = [float(v) for v in quat_xyzw]
+        except Exception:
+            return (None, None, None)
+        xx, yy, zz = x * x, y * y, z * z
+        xy, xz, yz = x * y, x * z, y * z
+        wx, wy, wz = w * x, w * y, w * z
+        rot = np.array(
+            [
+                [1 - 2 * (yy + zz), 2 * (xy - wz), 2 * (xz + wy)],
+                [2 * (xy + wz), 1 - 2 * (xx + zz), 2 * (yz - wx)],
+                [2 * (xz - wy), 2 * (yz + wx), 1 - 2 * (xx + yy)],
+            ],
+            dtype=float,
+        )
+        projected = rot.T @ np.array([0.0, 0.0, -1.0], dtype=float)
+        return (float(projected[0]), float(projected[1]), float(projected[2]))
 
     def get_protocol_usage(self) -> Dict[str, int]:
         return dict(self.protocol_usage)
@@ -419,6 +471,8 @@ class BipedalRobotController:
         self._estop_reason = ""
         self._startup_wrap_checked = False
         self._state_only_enforced = False
+        self._ensure_tx_executor()
+        self._ensure_rx_executor()
         self._open_log()
         if auto_enable and mode == "control":
             self.enable_all()
@@ -437,6 +491,8 @@ class BipedalRobotController:
         if disable_motors:
             self.disable_all()
         self._close_log()
+        self._shutdown_tx_executor()
+        self._shutdown_rx_executor()
         self._shutdown_buses()
         with self._imu_lock:
             imu = self._imu
@@ -464,18 +520,18 @@ class BipedalRobotController:
             return False
         self._send_cmd_ff(motor_id, CAN_CMD_ENABLE)
         self.protocol_usage["enable"] += 1
-        rx = self._recv_any(self.recv_timeout_s)
+        rx = self._recv_motor_reply(motor_id, self.recv_timeout_s)
         if rx is not None:
-            self._try_update_state_from_msg(rx)
-        return rx is not None
+            return True
+        return False
 
     def disable(self, motor_id: int) -> bool:
         self._send_cmd_ff(motor_id, CAN_CMD_DISABLE)
         self.protocol_usage["disable"] += 1
-        rx = self._recv_any(self.recv_timeout_s)
+        rx = self._recv_motor_reply(motor_id, self.recv_timeout_s)
         if rx is not None:
-            self._try_update_state_from_msg(rx)
-        return rx is not None
+            return True
+        return False
 
     def set_zero(self, motor_id: int, *, wait_s: float = 0.5):
         if self._estop:
@@ -483,10 +539,7 @@ class BipedalRobotController:
         data = [0xFF] * 7 + [CAN_CMD_ZERO]
         self._send8(motor_id, data)
         self.protocol_usage["zero"] += 1
-        rx = self._recv_any(wait_s)
-        if rx is not None:
-            self._try_update_state_from_msg(rx)
-        return rx
+        return self._recv_motor_reply(motor_id, wait_s)
 
     def enable_all(self) -> None:
         for mid in MOTOR_IDS:
@@ -657,24 +710,32 @@ class BipedalRobotController:
     def _request_state(self, motor_ids: Iterable[int], *, settle_s: float = 0.001) -> list[int]:
         ids = list(motor_ids)
         touched = set()
+        bus_frames: list[tuple[Any, list[tuple[int, bytes]]]] = [
+            (self.bus_can0, []),
+            (self.bus_can1, []),
+        ]
 
         for mid in ids:
             data = [0xFF] * 7 + [CAN_CMD_CLEAR_FAULT]
-            self._send8(mid, data)
+            payload = bytes(data)
+            bus = self._bus_for_motor(mid)
+            if bus is self.bus_can0:
+                bus_frames[0][1].append((mid, payload))
+            else:
+                bus_frames[1][1].append((mid, payload))
             self.protocol_usage["clear_fault"] += 1
 
-        time.sleep(settle_s)
+        self._send_frames_parallel(bus_frames, warning_context="State request batch send")
 
-        max_msgs = max(4 * len(ids), 32)
-        for _ in range(max_msgs):
-            rx = self._recv_any(self.recv_timeout_s)
-            if rx is None:
-                break
-            rec_mid = self._try_update_state_from_msg(rx)
-            if rec_mid is not None:
-                touched.add(rec_mid)
-                if len(touched) == len(ids):
-                    break
+        if settle_s > 0.0:
+            time.sleep(settle_s)
+
+        touched.update(
+            self._drain_rx_states(
+                timeout_s=self.recv_timeout_s,
+                max_msgs_per_bus=self.RX_FLUSH_MAX_MSGS_PER_BUS,
+            )
+        )
 
         return [mid for mid in ids if mid not in touched]
 
@@ -718,6 +779,10 @@ class BipedalRobotController:
             commands = {mid: cmd for mid, cmd in self.action.items()}
 
         send_raw = self._build_send_raw_from_joint_error(commands)
+        bus_frames: list[tuple[Any, list[tuple[int, bytes]]]] = [
+            (self.bus_can0, []),
+            (self.bus_can1, []),
+        ]
         for mid in MOTOR_IDS:
             cmd = commands[mid]
             cmd_eff = MotorCommand(
@@ -727,8 +792,22 @@ class BipedalRobotController:
                 kp=cmd.kp,
                 kd=cmd.kd,
             )
-            self._mit_command(mid, cmd_eff, clamp=False)
-        self._drain_rx_states(max_wait_s=max(0.001, self.recv_timeout_s * len(MOTOR_IDS)), max_msgs=4 * len(MOTOR_IDS))
+            payload = self._prepare_mit_payload(mid, cmd_eff, clamp=False)
+            if payload is None:
+                continue
+            bus = self._bus_for_motor(mid)
+            if bus is self.bus_can0:
+                bus_frames[0][1].append((mid, payload))
+            else:
+                bus_frames[1][1].append((mid, payload))
+        self.protocol_usage["mit_control"] += self._send_frames_parallel(
+            bus_frames,
+            warning_context="MIT batch send",
+        )
+        self._drain_rx_states(
+            timeout_s=self.recv_timeout_s,
+            max_msgs_per_bus=self.RX_FLUSH_MAX_MSGS_PER_BUS,
+        )
 
     def _build_send_raw_from_joint_error(self, commands: Dict[int, MotorCommand]) -> Dict[int, float]:
         """
@@ -846,21 +925,25 @@ class BipedalRobotController:
 
         sp_l = float(ANKLE_COUPLING_CALIBRATION_LEFT["pitch"]["sign"])
         sr_l = float(ANKLE_COUPLING_CALIBRATION_LEFT["roll"]["sign"])
+        s5 = float(self.motor_sign[5])
+        s6 = float(self.motor_sign[6])
         u_l = float(qd_deg_s[4]) / sp_l
         v_l = float(qd_deg_s[5]) / sr_l
-        qd_raw[5] = u_l + v_l
-        qd_raw[6] = v_l - u_l
-        tau_raw[5] = 0.5 * sp_l * float(tau_nm[4]) + 0.5 * sr_l * float(tau_nm[5])
-        tau_raw[6] = -0.5 * sp_l * float(tau_nm[4]) + 0.5 * sr_l * float(tau_nm[5])
+        qd_raw[5] = float((u_l + v_l) / s5)
+        qd_raw[6] = float((v_l - u_l) / s6)
+        tau_raw[5] = float(s5 * (0.5 * sp_l * float(tau_nm[4]) + 0.5 * sr_l * float(tau_nm[5])))
+        tau_raw[6] = float(s6 * (-0.5 * sp_l * float(tau_nm[4]) + 0.5 * sr_l * float(tau_nm[5])))
 
         sp_r = float(ANKLE_COUPLING_CALIBRATION_RIGHT["pitch"]["sign"])
         sr_r = float(ANKLE_COUPLING_CALIBRATION_RIGHT["roll"]["sign"])
+        s11 = float(self.motor_sign[11])
+        s12 = float(self.motor_sign[12])
         u_r = float(qd_deg_s[10]) / sp_r
         v_r = float(qd_deg_s[11]) / sr_r
-        qd_raw[11] = u_r + v_r
-        qd_raw[12] = v_r - u_r
-        tau_raw[11] = 0.5 * sp_r * float(tau_nm[10]) + 0.5 * sr_r * float(tau_nm[11])
-        tau_raw[12] = -0.5 * sp_r * float(tau_nm[10]) + 0.5 * sr_r * float(tau_nm[11])
+        qd_raw[11] = float((u_r + v_r) / s11)
+        qd_raw[12] = float((v_r - u_r) / s12)
+        tau_raw[11] = float(s11 * (0.5 * sp_r * float(tau_nm[10]) + 0.5 * sr_r * float(tau_nm[11])))
+        tau_raw[12] = float(s12 * (-0.5 * sp_r * float(tau_nm[10]) + 0.5 * sr_r * float(tau_nm[11])))
         return qd_raw, tau_raw
 
     def _ankle_pitch_roll_from_actions(self, a1_cmd: MotorCommand, a2_cmd: MotorCommand, *, side_name: str) -> tuple[float, float]:
@@ -940,6 +1023,44 @@ class BipedalRobotController:
             return np.deg2rad(qd_deg_s[:out_nq])
         return qd_deg_s[:out_nq]
 
+    def motor_torque_to_joint_torque(
+        self,
+        motor_raw_tau_nm: Dict[int, float],
+        *,
+        nq: Optional[int] = None,
+    ) -> np.ndarray:
+        """
+        Convert per-motor raw torques (N.m) to model joint torques.
+        Joint order matches `motor_state_to_joint_state`.
+        """
+        out_nq = int(self._model_nq if nq is None else nq)
+        tau_nm = np.zeros(max(12, out_nq), dtype=float)
+
+        tau_nm[0] = float(float(motor_raw_tau_nm[1]) / self.motor_sign[1])
+        tau_nm[1] = float(float(motor_raw_tau_nm[2]) / self.motor_sign[2])
+        tau_nm[2] = float(float(motor_raw_tau_nm[3]) / self.motor_sign[3])
+        tau_nm[3] = float(float(motor_raw_tau_nm[4]) / self.motor_sign[4])
+        tau_nm[6] = float(float(motor_raw_tau_nm[7]) / self.motor_sign[7])
+        tau_nm[7] = float(float(motor_raw_tau_nm[8]) / self.motor_sign[8])
+        tau_nm[8] = float(float(motor_raw_tau_nm[9]) / self.motor_sign[9])
+        tau_nm[9] = float(float(motor_raw_tau_nm[10]) / self.motor_sign[10])
+
+        t5_cal = float(motor_raw_tau_nm[5]) / self.motor_sign[5]
+        t6_cal = float(motor_raw_tau_nm[6]) / self.motor_sign[6]
+        t11_cal = float(motor_raw_tau_nm[11]) / self.motor_sign[11]
+        t12_cal = float(motor_raw_tau_nm[12]) / self.motor_sign[12]
+
+        sp_l = float(ANKLE_COUPLING_CALIBRATION_LEFT["pitch"]["sign"])
+        sr_l = float(ANKLE_COUPLING_CALIBRATION_LEFT["roll"]["sign"])
+        tau_nm[4] = float((t5_cal - t6_cal) / sp_l)
+        tau_nm[5] = float((t5_cal + t6_cal) / sr_l)
+
+        sp_r = float(ANKLE_COUPLING_CALIBRATION_RIGHT["pitch"]["sign"])
+        sr_r = float(ANKLE_COUPLING_CALIBRATION_RIGHT["roll"]["sign"])
+        tau_nm[10] = float((t11_cal - t12_cal) / sp_r)
+        tau_nm[11] = float((t11_cal + t12_cal) / sr_r)
+        return tau_nm[:out_nq]
+
     def _refresh_joint_velocity_from_state_locked(self, *, stamp_s: Optional[float] = None) -> None:
         motor_vel_raw_deg_s = {mid: float(self.state[mid].velocity_deg_s) for mid in MOTOR_IDS}
         qd_deg_s = self.motor_velocity_to_joint_velocity(motor_vel_raw_deg_s, output_radians=False, nq=12)
@@ -971,6 +1092,10 @@ class BipedalRobotController:
     def _send_damping_all(self) -> None:
         with self._state_lock:
             snapshot = {mid: st for mid, st in self.state.items()}
+        bus_frames: list[tuple[Any, list[tuple[int, bytes]]]] = [
+            (self.bus_can0, []),
+            (self.bus_can1, []),
+        ]
         for mid in MOTOR_IDS:
             st = snapshot[mid]
             damping_cmd = MotorCommand(
@@ -980,13 +1105,26 @@ class BipedalRobotController:
                 kp=0.0,
                 kd=DAMPING_KD,
             )
-            self._mit_command(mid, damping_cmd, clamp=False)
-            self.protocol_usage["damping"] += 1
-        self._drain_rx_states(max_wait_s=max(0.001, self.recv_timeout_s * len(MOTOR_IDS)), max_msgs=4 * len(MOTOR_IDS))
+            payload = self._prepare_mit_payload(mid, damping_cmd, clamp=False)
+            if payload is None:
+                continue
+            bus = self._bus_for_motor(mid)
+            if bus is self.bus_can0:
+                bus_frames[0][1].append((mid, payload))
+            else:
+                bus_frames[1][1].append((mid, payload))
+        self.protocol_usage["damping"] += self._send_frames_parallel(
+            bus_frames,
+            warning_context="Damping batch send",
+        )
+        self._drain_rx_states(
+            timeout_s=self.recv_timeout_s,
+            max_msgs_per_bus=self.RX_FLUSH_MAX_MSGS_PER_BUS,
+        )
 
-    def _mit_command(self, motor_id: int, cmd: MotorCommand, *, clamp: bool) -> None:
+    def _prepare_mit_payload(self, motor_id: int, cmd: MotorCommand, *, clamp: bool) -> Optional[bytes]:
         if self._estop:
-            return
+            return None
 
         spec = MOTORS[motor_id]
         gains = self.gains[motor_id]
@@ -1002,7 +1140,7 @@ class BipedalRobotController:
             if now - self._last_jump_warn_s[motor_id] > 0.5:
                 print(f"[WARN] m{motor_id}: no valid state yet, skipping command send")
                 self._last_jump_warn_s[motor_id] = now
-            return
+            return None
 
         cur_raw = float(st.position_deg)
         pos_raw = req_raw
@@ -1016,7 +1154,7 @@ class BipedalRobotController:
                     f"allowed=({lo + COMMAND_MARGIN_DEG:.1f}, {hi - COMMAND_MARGIN_DEG:.1f}), skipping send"
                 )
                 self._last_jump_warn_s[motor_id] = now
-            return
+            return None
         delta = abs(pos_raw - cur_raw)
         if delta > self.max_cmd_delta_deg:
             now = time.time()
@@ -1026,9 +1164,9 @@ class BipedalRobotController:
                     f"cur_raw={cur_raw:.1f}, req_raw={req_raw:.1f}, tgt_raw={pos_raw:.1f}, skipping send"
                 )
                 self._last_jump_warn_s[motor_id] = now
-            return
+            return None
 
-        payload = pack_mit_command(
+        return pack_mit_command(
             position_deg=pos_raw,
             velocity_deg_s=float(cmd.velocity_deg_s),
             kp=kp,
@@ -1038,6 +1176,11 @@ class BipedalRobotController:
             vmax=spec.vmax_rad_s,
             tmax=spec.tmax_nm,
         )
+
+    def _mit_command(self, motor_id: int, cmd: MotorCommand, *, clamp: bool) -> None:
+        payload = self._prepare_mit_payload(motor_id, cmd, clamp=clamp)
+        if payload is None:
+            return
         self._send8(motor_id, payload)
         self.protocol_usage["mit_control"] += 1
 
@@ -1047,13 +1190,13 @@ class BipedalRobotController:
         """
         with self._state_lock:
             snapshot = {mid: st for mid, st in self.state.items()}
-        for mid in MOTOR_IDS:
+        for mid in [1,2,3,4,7,8,9,10]: #HACK remove the ankle
             st = snapshot[mid]
             if st.stamp <= 0.0:
                 continue
             cur_raw = float(st.position_deg)
             tgt_raw = self._resolve_raw_target_near_current(mid, float(target_raw[mid]), cur_raw)
-            if not self._raw_command_in_limits(mid, tgt_raw, ref_raw_deg=cur_raw):
+            if self.enforce_command_limits and (not self._raw_command_in_limits(mid, tgt_raw, ref_raw_deg=cur_raw)):
                 lo, hi = self._raw_limits_near_ref(mid, self._raw_command_limits().get(mid, (-np.inf, np.inf)), cur_raw)
                 print(
                     f"[WARN] m{mid}: action update out of limits, tgt_raw={tgt_raw:.1f}, "
@@ -1107,25 +1250,45 @@ class BipedalRobotController:
         x = float(pos_raw_deg)
         return (lo_safe <= x <= hi_safe)
 
-    def _drain_rx_states(self, *, max_wait_s: float, max_msgs: int = 64) -> int:
+    def _drain_rx_states(
+        self,
+        *,
+        timeout_s: Optional[float] = None,
+        max_msgs_per_bus: int = RX_FLUSH_MAX_MSGS_PER_BUS,
+    ) -> list[int]:
         """
-        Drain and decode state frames after a batched TX phase.
+        Drain both buses in parallel.
 
-        Non-blocking behavior:
-          - stop immediately when no frame is ready
-          - leave late frames for next control iteration
+        For each bus worker:
+          - keep receiving until bus.recv(timeout_s) times out once
+          - then consider that bus empty
+          - stop early if the per-bus safety cap is reached
         """
-        n = 0
-        deadline = time.perf_counter() + max(0.0, float(max_wait_s))
-        while n < int(max_msgs):
-            if time.perf_counter() >= deadline:
-                break
-            rx = self._recv_any(0.0)
-            if rx is None:
-                break
-            self._try_update_state_from_msg(rx)
-            n += 1
-        return n
+        timeout = self.recv_timeout_s if timeout_s is None else max(0.0, float(timeout_s))
+        executor = self._ensure_rx_executor()
+        futures = [
+            executor.submit(
+                self._drain_bus_states,
+                self.bus_can0,
+                timeout_s=timeout,
+                max_msgs=max_msgs_per_bus,
+            ),
+            executor.submit(
+                self._drain_bus_states,
+                self.bus_can1,
+                timeout_s=timeout,
+                max_msgs=max_msgs_per_bus,
+            ),
+        ]
+        touched: list[int] = []
+        for future in futures:
+            try:
+                _, bus_touched = future.result()
+            except Exception as exc:
+                logger.warning("Bus RX flush failed: %s", exc)
+                continue
+            touched.extend(bus_touched)
+        return touched
 
     # -------------------------
     # Safety
@@ -1229,6 +1392,26 @@ class BipedalRobotController:
         self._log_writer = csv.writer(self._log_fp)
 
         header = ["time_s", "mode", "estop", "estop_reason", "damping_active", "missing_ids"]
+        header += [
+            "orientation_timestamp_s",
+            "orientation_quat_x",
+            "orientation_quat_y",
+            "orientation_quat_z",
+            "orientation_quat_w",
+            "projected_gravity_x",
+            "projected_gravity_y",
+            "projected_gravity_z",
+            "imu_gyro_x_rad_s",
+            "imu_gyro_y_rad_s",
+            "imu_gyro_z_rad_s",
+            "imu_lin_vel_x_m_s",
+            "imu_lin_vel_y_m_s",
+            "imu_lin_vel_z_m_s",
+            "imu_lin_acc_x_m_s2",
+            "imu_lin_acc_y_m_s2",
+            "imu_lin_acc_z_m_s2",
+            "imu_error",
+        ]
         for mid in MOTOR_IDS:
             header += [
                 f"m{mid}_pos_deg",
@@ -1269,7 +1452,34 @@ class BipedalRobotController:
             joint_vel_rad_s = np.asarray(self.joint_velocity_rad_s, dtype=float).copy()
         with self._action_lock:
             action_snapshot = {mid: cmd for mid, cmd in self.action.items()}
+        imu_state = self.get_imu_snapshot()
+        quat_xyzw = self.get_orientation_quaternion()
+        orientation_stamp_s = self.get_orientation_timestamp()
+        projected_gravity = self._projected_gravity_from_quat_xyzw(quat_xyzw)
+        imu_gyro = self._extract_imu_vec3(imu_state, "gyro_rads", "ang_vel_rad_s")
+        imu_lin_vel = self._extract_imu_vec3(imu_state, "linear_velocity_mps", "lin_vel_m_s")
+        imu_lin_acc = self._extract_imu_vec3(imu_state, "linear_acceleration_mps2", "lin_acc_m_s2", "linear_acceleration")
         row = [time.time(), self.mode, int(self._estop), self._estop_reason, int(self._damping_active), ",".join(map(str, missing_ids))]
+        row += [
+            orientation_stamp_s if orientation_stamp_s > 0.0 else "",
+            quat_xyzw[0] if quat_xyzw is not None else "",
+            quat_xyzw[1] if quat_xyzw is not None else "",
+            quat_xyzw[2] if quat_xyzw is not None else "",
+            quat_xyzw[3] if quat_xyzw is not None else "",
+            projected_gravity[0] if projected_gravity[0] is not None else "",
+            projected_gravity[1] if projected_gravity[1] is not None else "",
+            projected_gravity[2] if projected_gravity[2] is not None else "",
+            imu_gyro[0] if imu_gyro[0] is not None else "",
+            imu_gyro[1] if imu_gyro[1] is not None else "",
+            imu_gyro[2] if imu_gyro[2] is not None else "",
+            imu_lin_vel[0] if imu_lin_vel[0] is not None else "",
+            imu_lin_vel[1] if imu_lin_vel[1] is not None else "",
+            imu_lin_vel[2] if imu_lin_vel[2] is not None else "",
+            imu_lin_acc[0] if imu_lin_acc[0] is not None else "",
+            imu_lin_acc[1] if imu_lin_acc[1] is not None else "",
+            imu_lin_acc[2] if imu_lin_acc[2] is not None else "",
+            "" if not isinstance(imu_state, dict) else str(imu_state.get("error", "")),
+        ]
         for mid in MOTOR_IDS:
             st = snapshot[mid]
             row += [st.position_deg, action_snapshot[mid].position_deg, st.velocity_deg_s, st.torque_nm, st.temp_mos_c]
@@ -1491,7 +1701,10 @@ class BipedalRobotController:
     # -------------------------
     def _send8(self, motor_id: int, data8: Iterable[int]) -> None:
         msg = can.Message(arbitration_id=int(motor_id), data=list(data8), is_extended_id=False)
-        self._bus_for_motor(motor_id).send(msg)
+        bus = self._bus_for_motor(motor_id)
+        tx_lock = self._tx_lock_for_bus(bus)
+        with tx_lock:
+            bus.send(msg)
 
     def _send_cmd_ff(self, motor_id: int, cmd: int) -> None:
         data = [0xFF] * 8
@@ -1505,23 +1718,109 @@ class BipedalRobotController:
             return self.bus_can1
         raise ValueError(f"Unsupported motor id {motor_id}, expected 1..12")
 
-    def _recv_any(self, timeout_s: float):
-        if float(timeout_s) <= 0.0:
-            msg = self.bus_can0.recv(0.0)
-            if msg is not None:
-                return msg
-            return self.bus_can1.recv(0.0)
+    def _tx_lock_for_bus(self, bus: Any) -> threading.Lock:
+        if bus is self.bus_can0:
+            return self._bus_can0_tx_lock
+        if bus is self.bus_can1:
+            return self._bus_can1_tx_lock
+        raise ValueError("Unsupported bus instance for TX lock lookup")
 
-        deadline = time.perf_counter() + max(0.0, float(timeout_s))
-        while time.perf_counter() < deadline:
-            msg = self.bus_can0.recv(0.0)
-            if msg is not None:
-                return msg
-            msg = self.bus_can1.recv(0.0)
-            if msg is not None:
-                return msg
-            time.sleep(0.0001)
-        return None
+    def _rx_lock_for_bus(self, bus: Any) -> threading.Lock:
+        if bus is self.bus_can0:
+            return self._bus_can0_rx_lock
+        if bus is self.bus_can1:
+            return self._bus_can1_rx_lock
+        raise ValueError("Unsupported bus instance for RX lock lookup")
+
+    def _ensure_tx_executor(self) -> ThreadPoolExecutor:
+        if self._tx_executor is None:
+            self._tx_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="bipedal-tx")
+        return self._tx_executor
+
+    def _ensure_rx_executor(self) -> ThreadPoolExecutor:
+        if self._rx_executor is None:
+            self._rx_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="bipedal-rx")
+        return self._rx_executor
+
+    def _shutdown_tx_executor(self) -> None:
+        if self._tx_executor is None:
+            return
+        self._tx_executor.shutdown(wait=True)
+        self._tx_executor = None
+
+    def _shutdown_rx_executor(self) -> None:
+        if self._rx_executor is None:
+            return
+        self._rx_executor.shutdown(wait=True)
+        self._rx_executor = None
+
+    def _send_bus_frames(self, bus: Any, frames: list[tuple[int, bytes]]) -> int:
+        sent = 0
+        tx_lock = self._tx_lock_for_bus(bus)
+        with tx_lock:
+            for motor_id, payload in frames:
+                msg = can.Message(arbitration_id=int(motor_id), data=list(payload), is_extended_id=False)
+                bus.send(msg)
+                sent += 1
+        return sent
+
+    def _send_frames_parallel(
+        self,
+        bus_frames: list[tuple[Any, list[tuple[int, bytes]]]],
+        *,
+        warning_context: str,
+    ) -> int:
+        executor = self._ensure_tx_executor()
+        futures = [
+            executor.submit(self._send_bus_frames, bus, frames)
+            for bus, frames in bus_frames
+            if frames
+        ]
+        sent = 0
+        for future in futures:
+            try:
+                sent += int(future.result())
+            except Exception as exc:
+                logger.warning("%s failed: %s", warning_context, exc)
+        return sent
+
+    def _recv_motor_reply(self, motor_id: int, timeout_s: float):
+        """
+        Wait for a reply on the target motor's bus, updating state for every
+        frame seen on that bus along the way.
+        """
+        timeout = max(0.0, float(timeout_s))
+        deadline = time.perf_counter() + timeout
+        bus = self._bus_for_motor(motor_id)
+        rx_lock = self._rx_lock_for_bus(bus)
+        while True:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0.0:
+                return None
+            with rx_lock:
+                rx = bus.recv(remaining)
+            if rx is None:
+                return None
+            rec_mid = self._try_update_state_from_msg(rx)
+            if rec_mid == int(motor_id):
+                return rx
+
+    def _drain_bus_states(self, bus: Any, *, timeout_s: float, max_msgs: int) -> tuple[int, list[int]]:
+        drained = 0
+        touched: list[int] = []
+        limit = max(0, int(max_msgs))
+        timeout = max(0.0, float(timeout_s))
+        rx_lock = self._rx_lock_for_bus(bus)
+        while drained < limit:
+            with rx_lock:
+                rx = bus.recv(timeout)
+            if rx is None:
+                break
+            rec_mid = self._try_update_state_from_msg(rx)
+            if rec_mid is not None:
+                touched.append(rec_mid)
+            drained += 1
+        return drained, touched
 
     def _shutdown_buses(self) -> None:
         for bus in (self.bus_can0, self.bus_can1):

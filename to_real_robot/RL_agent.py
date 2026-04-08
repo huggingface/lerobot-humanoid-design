@@ -4,6 +4,7 @@ import csv
 import importlib
 import json
 import pickle
+import re
 import threading
 import time
 from collections import deque
@@ -54,6 +55,24 @@ PREFERRED_POLICY_ACTION_ORDER_12 = [
     "left.ankle_roll",
 ]
 
+# Newer MJLab exports embed joint observations/actions in block order:
+# [right(6), left(6)].
+POLICY_BLOCK_ACTION_KEYS_12 = [
+    "right.hipz",
+    "right.hipx",
+    "right.hipy",
+    "right.knee",
+    "right.ankle_pitch",
+    "right.ankle_roll",
+    "left.hipz",
+    "left.hipx",
+    "left.hipy",
+    "left.knee",
+    "left.ankle_pitch",
+    "left.ankle_roll",
+]
+SNAPSHOT_TO_POLICY_JOINT_IDX = np.array([6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5], dtype=np.int64)
+
 # Debug sign overrides applied on top of action scales.
 ACTION_SCALE_SIGN_OVERRIDES_BY_KEY = {
     "left.hipy": -1.0,
@@ -74,7 +93,9 @@ class AgentSpec:
     action_scale: float = 1.0
     policy_terms: List[str] = field(default_factory=list)
     action_scales_rad: List[float] = field(default_factory=list)
+    obs_term_scales: Dict[str, float] = field(default_factory=dict)
     joint_vel_source: str = "auto"  # auto | finite_diff
+    use_policy_joint_order: bool = False
 
 
 def _load_config(path: Path) -> Dict[str, Any]:
@@ -223,6 +244,94 @@ def _extract_action_scales(cfg: Dict[str, Any], action_keys: List[str]) -> List[
     return out
 
 
+def _extract_observation_term_scales(cfg: Dict[str, Any], policy_terms: List[str]) -> Dict[str, float]:
+    terms_cfg = _get_first(
+        cfg,
+        keys=(
+            "env_cfg.value.observations.policy.terms",
+            "env_cfg.observations.policy.terms",
+            "observations.policy.terms",
+        ),
+        default={},
+    )
+    if not isinstance(terms_cfg, dict):
+        return {}
+
+    out: Dict[str, float] = {}
+    for term_name in policy_terms:
+        term_cfg = terms_cfg.get(term_name)
+        if not isinstance(term_cfg, dict):
+            continue
+        scale = term_cfg.get("scale", None)
+        if scale is None:
+            continue
+        try:
+            out[str(term_name)] = float(scale)
+        except Exception:
+            continue
+    return out
+
+
+def _extract_name_list_from_onnx_bytes(
+    onnx_path: Path,
+    *,
+    normalizer: Optional[Any] = None,
+) -> List[str]:
+    """Best-effort extraction of embedded comma-separated metadata from ONNX exports."""
+    if not onnx_path.exists() or onnx_path.suffix.lower() != ".onnx":
+        return []
+    try:
+        text = onnx_path.read_bytes().decode("latin1", errors="ignore")
+    except Exception:
+        return []
+
+    best: List[str] = []
+    best_score = 0
+    for m in re.finditer(r"([A-Za-z0-9_]+(?:,[A-Za-z0-9_]+){3,})", text):
+        raw_tokens = [tok.strip().lower() for tok in m.group(1).split(",") if tok.strip()]
+        if not raw_tokens:
+            continue
+        if normalizer is not None:
+            norm_tokens = [normalizer(tok) for tok in raw_tokens]
+            tokens = [tok for tok in norm_tokens if isinstance(tok, str)]
+        else:
+            tokens = raw_tokens
+        score = len(tokens)
+        if score > best_score:
+            best = tokens
+            best_score = score
+    return best
+
+
+def _extract_onnx_joint_action_keys(policy_path: Path) -> List[str]:
+    raw = _extract_name_list_from_onnx_bytes(policy_path, normalizer=_normalize_joint_name)
+    if not raw:
+        return []
+    out: List[str] = []
+    for key in raw:
+        if key not in out:
+            out.append(key)
+    return out
+
+
+def _uses_block_policy_joint_order(action_keys: Sequence[str]) -> bool:
+    return list(action_keys) == POLICY_BLOCK_ACTION_KEYS_12
+
+
+def _reshape_joint_vector_12(values: Any, *, dtype: Any = np.float32) -> np.ndarray:
+    arr = np.asarray(values if values is not None else [0.0] * 12, dtype=dtype).reshape(-1)
+    if arr.size < 12:
+        arr = np.pad(arr, (0, 12 - arr.size))
+    return arr[:12]
+
+
+def _policy_order_joint_vector(values: Any, *, use_policy_joint_order: bool, dtype: Any = np.float32) -> np.ndarray:
+    arr = _reshape_joint_vector_12(values, dtype=dtype)
+    if use_policy_joint_order:
+        arr = arr[SNAPSHOT_TO_POLICY_JOINT_IDX]
+    return arr
+
+
 def _dict_joint_pos_to_q_rad(joint_pos: Dict[str, Any]) -> Optional[np.ndarray]:
     key_to_idx = {
         "hipz_left": 0,
@@ -335,6 +444,7 @@ def infer_agent_spec(cfg: Dict[str, Any]) -> AgentSpec:
         joint_vel_source = "auto"
 
     action_scales = _extract_action_scales(cfg, action_keys)
+    obs_term_scales = _extract_observation_term_scales(cfg, policy_terms)
 
     return AgentSpec(
         action_keys=list(action_keys),
@@ -343,8 +453,13 @@ def infer_agent_spec(cfg: Dict[str, Any]) -> AgentSpec:
         action_scale=action_scale,
         policy_terms=policy_terms,
         action_scales_rad=action_scales,
+        obs_term_scales=obs_term_scales,
         joint_vel_source=joint_vel_source,
+        use_policy_joint_order=_uses_block_policy_joint_order(action_keys),
     )
+
+
+JOINT_TORQUE_TERM_NAMES = ("joint_torque", "joint_torques", "joint_effort", "joint_efforts")
 
 
 class PolicyWrapper:
@@ -533,6 +648,8 @@ class RLAgent:
     _curr_obs_joint_pos: Optional[np.ndarray] = field(default=None, init=False)
     _prev_obs_joint_vel: Optional[np.ndarray] = field(default=None, init=False)
     _curr_obs_joint_vel: Optional[np.ndarray] = field(default=None, init=False)
+    _prev_obs_joint_torque: Optional[np.ndarray] = field(default=None, init=False)
+    _curr_obs_joint_torque: Optional[np.ndarray] = field(default=None, init=False)
     _command_twist: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float32), init=False)
     _command_source: Optional[Any] = field(default=None, init=False)
     _log_obs: bool = field(default=False, init=False)
@@ -575,14 +692,21 @@ class RLAgent:
         q_ref = _extract_default_joint_pos_rad_from_cfg(cfg)
         if q_ref is None or q_ref.size < 12:
             raise ValueError("Expected env_cfg.value.scene.entities.robot.init_state.joint_pos with 12 joints")
-        policy = PolicyWrapper.load(Path(policy_path), cfg)
+        ppath = Path(policy_path)
+        onnx_action_keys = _extract_onnx_joint_action_keys(ppath)
+        if len(onnx_action_keys) == 12:
+            spec.action_keys = list(onnx_action_keys)
+            spec.action_scales_rad = _extract_action_scales(cfg, spec.action_keys)
+            spec.use_policy_joint_order = _uses_block_policy_joint_order(spec.action_keys)
+        policy = PolicyWrapper.load(ppath, cfg)
         policy.select_onnx_action_output(len(spec.action_keys))
         agent = cls(robot=robot, spec=spec, policy=policy)
         agent._default_joint_pos_rad = q_ref[:12].astype(np.float32, copy=True)
         print(
             f"[RLAgent] loaded spec: terms={spec.policy_terms}, "
             f"action_keys={spec.action_keys}, action_scales_rad={spec.action_scales_rad}, "
-            f"base_action_scale={spec.action_scale}, joint_vel_source={spec.joint_vel_source}"
+            f"base_action_scale={spec.action_scale}, joint_vel_source={spec.joint_vel_source}, "
+            f"use_policy_joint_order={spec.use_policy_joint_order}, obs_term_scales={spec.obs_term_scales}"
         )
         if log_observation or log_action:
             resolved_log_path = Path(log_path) if log_path else Path("rl_agent_debug_log.csv")
@@ -682,6 +806,8 @@ class RLAgent:
         self._curr_obs_joint_pos = None
         self._prev_obs_joint_vel = None
         self._curr_obs_joint_vel = None
+        self._prev_obs_joint_torque = None
+        self._curr_obs_joint_torque = None
         self._sim_decimation_steps = None
         self._next_inference_sim_step = None
         self._last_seen_sim_step = None
@@ -706,16 +832,38 @@ class RLAgent:
             "obs_dim": int(self._last_obs.size) if self._last_obs is not None else 0,
             "action_dim": int(self._last_action.size) if self._last_action is not None else 0,
             "policy_terms": list(self.spec.policy_terms),
+            "use_policy_joint_order": bool(self.spec.use_policy_joint_order),
+            "obs_term_scales": dict(self.spec.obs_term_scales),
         }
 
+    def _policy_order_joint_state(self, snapshot: Dict[str, Any], key: str) -> np.ndarray:
+        return _policy_order_joint_vector(
+            snapshot.get(key, [0.0] * 12),
+            use_policy_joint_order=bool(self.spec.use_policy_joint_order),
+            dtype=np.float32,
+        )
+
+    def _policy_order_default_joint_pos_rad(self) -> np.ndarray:
+        if self._default_joint_pos_rad is None:
+            raise RuntimeError("default joint reference pose not initialized")
+        return _policy_order_joint_vector(
+            self._default_joint_pos_rad,
+            use_policy_joint_order=bool(self.spec.use_policy_joint_order),
+            dtype=np.float32,
+        )
+
+    def _apply_obs_term_scale(self, term_name: str, values: np.ndarray) -> np.ndarray:
+        out = np.asarray(values, dtype=np.float32).reshape(-1)
+        scale = float(self.spec.obs_term_scales.get(term_name, 1.0))
+        if np.isfinite(scale) and scale != 1.0:
+            out = (out * scale).astype(np.float32, copy=False)
+        return out
+
     def _term_observation_vector(self, snapshot: Dict[str, Any], term_name: str) -> np.ndarray:
-        q_deg = np.asarray(snapshot.get("joint_state_deg", [0.0] * 12), dtype=np.float32).reshape(-1)
-        if q_deg.size < 12:
-            q_deg = np.pad(q_deg, (0, 12 - q_deg.size))
+        q_deg = self._policy_order_joint_state(snapshot, "joint_state_deg")
         q_rad = np.deg2rad(q_deg)
 
-        qd_snap = np.asarray(snapshot.get("joint_velocity_rad_s", []), dtype=np.float32).reshape(-1)
-        qd_snap_ok = qd_snap.size >= 12
+        qd_snap = self._policy_order_joint_state(snapshot, "joint_velocity_rad_s")
         now_s = float(snapshot.get("time_s", time.time()))
         if self._prev_q_rad is None or self._prev_q_t_s is None or now_s <= self._prev_q_t_s:
             qd_fd = np.zeros_like(q_rad)
@@ -726,52 +874,64 @@ class RLAgent:
         if self.spec.joint_vel_source in ("finite_diff", "finite_difference", "finite_differences", "fd"):
             qd_rad_s = qd_fd
         else:
-            qd_rad_s = qd_snap[:12] if qd_snap_ok else qd_fd
+            qd_rad_s = qd_snap
 
         if term_name == "actions":
-            return self._last_policy_action.copy()
+            return self._apply_obs_term_scale(term_name, self._last_policy_action.copy())
         if term_name == "base_ang_vel":
             imu = snapshot.get("imu") or {}
             gyro = imu.get("gyro_rads") if isinstance(imu, dict) else None
             if gyro is None and isinstance(imu, dict):
                 gyro = imu.get("ang_vel_rad_s")
             if isinstance(gyro, (list, tuple)) and len(gyro) >= 3:
-                return np.array([float(gyro[0]), float(gyro[1]), float(gyro[2])], dtype=np.float32)
-            return np.zeros(3, dtype=np.float32)
+                return self._apply_obs_term_scale(
+                    term_name,
+                    np.array([float(gyro[0]), float(gyro[1]), float(gyro[2])], dtype=np.float32),
+                )
+            return self._apply_obs_term_scale(term_name, np.zeros(3, dtype=np.float32))
         if term_name == "base_lin_vel":
             imu = snapshot.get("imu") or {}
             lin_vel = imu.get("linear_velocity_mps") if isinstance(imu, dict) else None
             if lin_vel is None and isinstance(imu, dict):
                 lin_vel = imu.get("lin_vel_m_s")
             if isinstance(lin_vel, (list, tuple)) and len(lin_vel) >= 3:
-                return np.array([float(lin_vel[0]), float(lin_vel[1]), float(lin_vel[2])], dtype=np.float32)
-            return np.zeros(3, dtype=np.float32)
+                return self._apply_obs_term_scale(
+                    term_name,
+                    np.array([float(lin_vel[0]), float(lin_vel[1]), float(lin_vel[2])], dtype=np.float32),
+                )
+            return self._apply_obs_term_scale(term_name, np.zeros(3, dtype=np.float32))
         if term_name == "command":
-            return self._command_twist.copy()
+            return self._apply_obs_term_scale(term_name, self._command_twist.copy())
         if term_name == "joint_pos":
-            if self._default_joint_pos_rad is None:
-                raise RuntimeError("default joint reference pose not initialized")
-            qpos_now = (q_rad - self._default_joint_pos_rad).astype(np.float32, copy=False)
+            qpos_now = (q_rad - self._policy_order_default_joint_pos_rad()).astype(np.float32, copy=False)
             # Observation-only convention fix (do not affect action reference).
             qpos_now = qpos_now.copy()
             qpos_now[[2, 4, 8, 10]] *= -1.0
+            qpos_now = self._apply_obs_term_scale(term_name, qpos_now)
             self._curr_obs_joint_pos = qpos_now.copy()
             if self._prev_obs_joint_pos is None:
                 return qpos_now
             return self._prev_obs_joint_pos.astype(np.float32, copy=False)
         if term_name == "joint_vel":
-            qd_now = qd_rad_s.astype(np.float32, copy=False)
+            qd_now = self._apply_obs_term_scale(term_name, qd_rad_s.astype(np.float32, copy=False))
             self._curr_obs_joint_vel = qd_now.copy()
             if self._prev_obs_joint_vel is None:
                 return np.zeros_like(qd_now, dtype=np.float32)
             return self._prev_obs_joint_vel.astype(np.float32, copy=False)
+        if term_name in JOINT_TORQUE_TERM_NAMES:
+            tau_now = self._policy_order_joint_state(snapshot, "joint_torque_nm")
+            tau_now = self._apply_obs_term_scale(term_name, tau_now)
+            self._curr_obs_joint_torque = tau_now.copy()
+            if self._prev_obs_joint_torque is None:
+                return np.zeros_like(tau_now, dtype=np.float32)
+            return self._prev_obs_joint_torque.astype(np.float32, copy=False)
         if term_name == "projected_gravity":
             q = snapshot.get("orientation_quaternion_xyzw")
             if isinstance(q, (list, tuple)) and len(q) == 4:
                 r = _quat_xyzw_to_rotmat(q)
                 g_world = np.array([0.0, 0.0, -1.0], dtype=np.float32)
-                return (r.T @ g_world).astype(np.float32)
-            return np.array([0.0, 0.0, -1.0], dtype=np.float32)
+                return self._apply_obs_term_scale(term_name, (r.T @ g_world).astype(np.float32))
+            return self._apply_obs_term_scale(term_name, np.array([0.0, 0.0, -1.0], dtype=np.float32))
 
         return np.zeros(0, dtype=np.float32)
 
@@ -781,15 +941,14 @@ class RLAgent:
 
         self._curr_obs_joint_pos = None
         self._curr_obs_joint_vel = None
+        self._curr_obs_joint_torque = None
         obs_map: Dict[str, np.ndarray] = {}
         for term_name in self.spec.policy_terms:
             obs_map[term_name] = self._term_observation_vector(snapshot, term_name)
         parts = [obs_map[t] for t in self.spec.policy_terms]
         obs = np.concatenate(parts, axis=0) if parts else np.zeros(0, dtype=np.float32)
 
-        q_deg = np.asarray(snapshot.get("joint_state_deg", [0.0] * 12), dtype=np.float32).reshape(-1)
-        if q_deg.size < 12:
-            q_deg = np.pad(q_deg, (0, 12 - q_deg.size))
+        q_deg = self._policy_order_joint_state(snapshot, "joint_state_deg")
         q_rad = np.deg2rad(q_deg)
         self._prev_q_rad = q_rad
         self._prev_q_t_s = float(snapshot.get("time_s", time.time()))
@@ -797,6 +956,8 @@ class RLAgent:
             self._prev_obs_joint_pos = self._curr_obs_joint_pos.copy()
         if self._curr_obs_joint_vel is not None:
             self._prev_obs_joint_vel = self._curr_obs_joint_vel.copy()
+        if self._curr_obs_joint_torque is not None:
+            self._prev_obs_joint_torque = self._curr_obs_joint_torque.copy()
         return obs.astype(np.float32, copy=False)
 
     def _build_history_obs(self, obs_now: np.ndarray) -> np.ndarray:

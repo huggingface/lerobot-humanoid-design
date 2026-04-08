@@ -59,18 +59,18 @@ for mid,gains in zip([1,2,3,4,5, 6,7,8,9,10, 11, 12],gain):
     robot.set_joint_gains(mid, kp=gains[0], kd=gains[1]) 
 
 for mid in [1,7]:
-    robot.set_joint_gains(mid, kp=40, kd=2) 
+    robot.set_joint_gains(mid, kp=40, kd=1) 
 
 for mid in [5,6,11,12]:
-    robot.set_joint_gains(mid, kp=20, kd=3) 
+    robot.set_joint_gains(mid, kp=60, kd=2) 
 
 
-robot.set_joint_gains(2, kp=90, kd=2) 
-robot.set_joint_gains(3, kp=90, kd=2) 
-robot.set_joint_gains(4, kp=90, kd=2) 
-robot.set_joint_gains(8, kp=90, kd=2) 
-robot.set_joint_gains(9, kp=90, kd=2) 
-robot.set_joint_gains(10, kp=90, kd=2) 
+robot.set_joint_gains(2, kp=110, kd=1) 
+robot.set_joint_gains(3, kp=110, kd=1) 
+robot.set_joint_gains(4, kp=110, kd=1) 
+robot.set_joint_gains(8, kp=110, kd=1) 
+robot.set_joint_gains(9, kp=110, kd=1) 
+robot.set_joint_gains(10, kp=110, kd=1) 
 
 
 robot.set_joint_gains(8, kp=90, kd=5) 
@@ -233,6 +233,21 @@ agent = RLAgent.from_files(
     log_every_n=1,                              # optional
 )
 
+
+for mid in [1,7]:
+    robot.set_joint_gains(mid, kp=40, kd=1) 
+
+for mid in [5,6,11,12]:
+    robot.set_joint_gains(mid, kp=60, kd=2) 
+
+
+robot.set_joint_gains(2, kp=110, kd=1) 
+robot.set_joint_gains(3, kp=110, kd=1) 
+robot.set_joint_gains(4, kp=110, kd=1) 
+robot.set_joint_gains(8, kp=110, kd=1) 
+robot.set_joint_gains(9, kp=110, kd=1) 
+robot.set_joint_gains(10, kp=110, kd=1) 
+
 # safety scaling (start small)
 agent.spec.action_scale = 0.1
 
@@ -241,6 +256,29 @@ agent.set_command_twist(0.0, 0.0, 0.0)
 agent.spec.joint_vel_source = "finite_difference"  # or "robot_state_estimation"
 agent.set_command_source(pad)
 agent.start()
+
+
+
+### Delay measurement helper
+
+from measure_actuator_delay import measure_actuator_delays
+
+# Assumes `robot` is already started in control mode and has valid state.
+# Use `all_joints=True` to sweep the full robot.
+results = measure_actuator_delays(
+    robot,
+    joint="left_hipz",
+    all_joints=False,
+    fps=100,
+    duration_s=2.0,
+    freq_hz=1.0,
+    amp_deg=10.0,
+    pre_roll_s=1.0,
+    between_s=0.5,
+    save_csv="delay_logs/delay_trace.csv",
+    save_png="delay_logs/delay_trace.png",
+)
+print(results["left_hipz"]["metrics"])
 
 
 ## sim
@@ -335,6 +373,8 @@ robot = SimBipedalRobotController(control_hz=200.0, fixed_base=False)
 robot.start(mode="control", auto_enable=True)
 robot.start_viewer()
 print("debug logs:", robot._debug_action_logs)  # should be False
+robot._viz_hz = 20.0  
+
 
 pad = GamepadController(
     name_substring="8bitdo",
@@ -367,3 +407,112 @@ for _ in range(50):
     q = robot._read_joint_q_deg()
     robot._warn_joint_state_out_of_bounds(q)
     time.sleep(0.6)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Mock Test thas should pass
+
+from bipedal_robot import BipedalRobotController
+from IMU_integration import IMU
+from mock_bus import MockBus
+
+from RL_agent_isolated import RLAgent
+from gamepad_controller import GamepadController
+imu = IMU(sensor="bno055", i2c_bus=1, address=0x28, rate_hz=100.0, frame_yaw_deg=180.0)
+
+# imu = IMU(sensor="jy901", mock=False, port="/dev/ttyAMA0", baudrate=9600)
+# robot = BipedalRobotController(control_hz=100.0, bus_can0=MockBus(), bus_can1=MockBus(),imu=imu)
+robot = BipedalRobotController(control_hz=100.0, imu=imu)
+
+robot.attach_default_meshcat()   # optional
+robot.set_max_command_delta(60.0)
+robot.start(mode="state_only", auto_enable=False)
+import time
+while True:
+    print(imu.read_dict()["gyro_rads"])
+    time.sleep(0.1)
+for mid in range(1, 13):
+    robot.set_joint_limit(mid, -720.0, 720.0)
+robot.set_max_command_delta(1000.0)
+
+robot.start(mode="control", auto_enable=True)
+robot.request_state_once()      # ensure valid stamps
+robot.enforce_command_limits = False
+
+robot._viz_hz = 20.0            # reduce lag a lot
+
+robot.set_action(
+left={
+    "hipz": 0.0,
+    "hipx": 0.0,
+    "hipy": 0,
+    "knee": 0.,
+    "ankle_pitch": 0.0,  # from ankley_left
+    "ankle_roll": 0.0,        # from anklex_left
+},
+right={
+    "hipz": 0.0,
+    "hipx": 0.0,
+    "hipy": 0.0,
+    "knee": 00.,
+    "ankle_pitch": 0.0,   # from ankley_right
+    "ankle_roll": 0.0,        # from anklex_right
+},
+)
+robot.set_mode("control")
+
+
+for mid in [1,7]:
+    robot.set_joint_gains(mid, kp=30, kd=3.0) 
+
+for mid in [5,6,11,12]:
+    robot.set_joint_gains(mid, kp=10, kd=0.75) 
+
+
+robot.set_joint_gains(2, kp=40, kd=3.0) 
+robot.set_joint_gains(3, kp=6, kd=4/20) 
+robot.set_joint_gains(4, kp=6, kd=4/20) 
+robot.set_joint_gains(8, kp=40, kd=3.0) 
+robot.set_joint_gains(9, kp=6, kd=4/20)
+robot.set_joint_gains(10, kp=6, kd=4/20)
+
+
+pad = GamepadController(
+    name_substring="8bitdo",
+    deadzone=0.12,
+    max_lin_x=0.75,
+    max_lin_y=0.5,
+    max_yaw_rate=0.8,
+)
+pad.connect()
+pad.start()
+
+agent = RLAgent.from_files(
+    robot,
+    config_path="RL_policy/less_noice_high_gain_torque_obs/config.yaml",
+    policy_path="RL_policy/less_noice_high_gain_torque_obs/policy.onnx", #2026-03-04_17-28-46.onnx",
+    log_path="RL_policy/less_noice_high_gain_torque_obs/debug_ctrl3.csv",
+    log_observation=True,
+    log_action=True,
+    log_every_n=1,
+)
+
+agent.spec.joint_vel_source = "auto"  # or "robot_state_estimation"
+
+# manual global scaling remains available
+agent.spec.action_scale = 0.0
+
+# pad provides (lin_x, lin_y, yaw_rate) commands
+agent.set_command_source(pad)
+agent.start()

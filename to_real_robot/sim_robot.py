@@ -390,8 +390,10 @@ class SimBipedalRobotController:
         }
         if include_joint_state:
             raw = {mid: float(motor_snapshot[mid]["position_deg"]) for mid in MOTOR_IDS}
+            tau_raw = {mid: float(motor_snapshot[mid]["torque_nm"]) for mid in MOTOR_IDS}
             out["joint_state_rad"] = self.motor_state_to_joint_state(raw, output_radians=True, nq=12).tolist()
             out["joint_state_deg"] = self.motor_state_to_joint_state(raw, output_radians=False, nq=12).tolist()
+            out["joint_torque_nm"] = self.motor_torque_to_joint_torque(tau_raw, nq=12).tolist()
             out["joint_velocity_deg_s"] = qd_deg_s.tolist()
             out["joint_velocity_rad_s"] = qd_rad_s.tolist()
         return out
@@ -1002,21 +1004,25 @@ class SimBipedalRobotController:
 
         sp_l = float(ANKLE_COUPLING_CALIBRATION_LEFT["pitch"]["sign"])
         sr_l = float(ANKLE_COUPLING_CALIBRATION_LEFT["roll"]["sign"])
+        s5 = float(self.motor_sign[5])
+        s6 = float(self.motor_sign[6])
         u_l = float(qd_deg_s[4]) / sp_l
         v_l = float(qd_deg_s[5]) / sr_l
-        qd_raw[5] = u_l + v_l
-        qd_raw[6] = v_l - u_l
-        tau_raw[5] = 0.5 * sp_l * float(tau_nm[4]) + 0.5 * sr_l * float(tau_nm[5])
-        tau_raw[6] = -0.5 * sp_l * float(tau_nm[4]) + 0.5 * sr_l * float(tau_nm[5])
+        qd_raw[5] = float((u_l + v_l) / s5)
+        qd_raw[6] = float((v_l - u_l) / s6)
+        tau_raw[5] = float(s5 * (0.5 * sp_l * float(tau_nm[4]) + 0.5 * sr_l * float(tau_nm[5])))
+        tau_raw[6] = float(s6 * (-0.5 * sp_l * float(tau_nm[4]) + 0.5 * sr_l * float(tau_nm[5])))
 
         sp_r = float(ANKLE_COUPLING_CALIBRATION_RIGHT["pitch"]["sign"])
         sr_r = float(ANKLE_COUPLING_CALIBRATION_RIGHT["roll"]["sign"])
+        s11 = float(self.motor_sign[11])
+        s12 = float(self.motor_sign[12])
         u_r = float(qd_deg_s[10]) / sp_r
         v_r = float(qd_deg_s[11]) / sr_r
-        qd_raw[11] = u_r + v_r
-        qd_raw[12] = v_r - u_r
-        tau_raw[11] = 0.5 * sp_r * float(tau_nm[10]) + 0.5 * sr_r * float(tau_nm[11])
-        tau_raw[12] = -0.5 * sp_r * float(tau_nm[10]) + 0.5 * sr_r * float(tau_nm[11])
+        qd_raw[11] = float((u_r + v_r) / s11)
+        qd_raw[12] = float((v_r - u_r) / s12)
+        tau_raw[11] = float(s11 * (0.5 * sp_r * float(tau_nm[10]) + 0.5 * sr_r * float(tau_nm[11])))
+        tau_raw[12] = float(s12 * (-0.5 * sp_r * float(tau_nm[10]) + 0.5 * sr_r * float(tau_nm[11])))
         return qd_raw, tau_raw
 
     def _joint_vel_deg_to_motor_raw(self, qd_deg_s: np.ndarray) -> Dict[int, float]:
@@ -1105,6 +1111,15 @@ class SimBipedalRobotController:
         out[10] = float((t11_cal - t12_cal) / sp_r)
         out[11] = float((t11_cal + t12_cal) / sr_r)
         return out
+
+    def motor_torque_to_joint_torque(
+        self,
+        motor_raw_tau_nm: Dict[int, float],
+        *,
+        nq: Optional[int] = None,
+    ) -> np.ndarray:
+        out_nq = int(self._model_nq if nq is None else nq)
+        return self._motor_tau_raw_to_joint_tau(motor_raw_tau_nm)[:out_nq]
 
     def _ankle_pitch_roll_from_cal_values(self, a1: float, a2: float, *, side_name: str) -> tuple[float, float]:
         cfg = ANKLE_COUPLING_CALIBRATION_LEFT if side_name == "left" else ANKLE_COUPLING_CALIBRATION_RIGHT

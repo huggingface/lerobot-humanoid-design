@@ -1,0 +1,427 @@
+import math
+import threading
+import time
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
+try:
+    # Preferred on Raspberry Pi
+    from smbus2 import SMBus
+except Exception:  # pragma: no cover
+    SMBus = None  # type: ignore
+
+
+@dataclass(frozen=True)
+class QuaternionSample:
+    """Quaternion in (w, x, y, z) + metadata."""
+    w: float
+    x: float
+    y: float
+    z: float
+    timestamp: float
+    source: str  # "quat"
+
+
+@dataclass(frozen=True)
+class VectorSample:
+    """3D vector sample (x,y,z) + timestamp."""
+    x: float
+    y: float
+    z: float
+    timestamp: float
+
+
+@dataclass(frozen=True)
+class ImuObservation:
+    """Convenience bundle for RL observations."""
+    quat: Optional[QuaternionSample]
+    ang_vel_rad_s: Optional[VectorSample]   # body-frame angular velocity (rad/s)
+    lin_acc_m_s2: Optional[VectorSample]    # body-frame linear acceleration (m/s^2) (gravity removed)
+    lin_vel_m_s: Optional[VectorSample]     # body-frame linear velocity (m/s), integrated (drifts!)
+    timestamp: float
+
+
+class BNO055IMU:
+    """
+    Non-blocking BNO055 reader over I2C.
+    - Background thread polls registers at a fixed rate.
+    - Exposes latest quaternion, angular velocity, linear acceleration, and (integrated) linear velocity.
+    - Angular velocity comes from GYR_DATA (deg/s) converted to rad/s.
+    - Linear acceleration uses LIA_DATA (gravity removed by fusion) converted to m/s^2.
+    - Linear velocity is trapezoidal integration of lin_acc (WILL drift), with a simple per-axis KF-ish pull-to-zero.
+
+    Practical notes:
+      - BNO055 must be in a fusion mode (e.g. NDOF) to get meaningful quaternion and linear acceleration.
+      - "lin_acc" is already gravity-compensated (LIA registers), so we do not need quaternion-based gravity removal.
+      - The integrated velocity will drift; use reset_velocity() at episode resets / standstill cues.
+    """
+
+    # ---- BNO055 register map (subset) ----
+    _REG_CHIP_ID = 0x00
+    _REG_OPR_MODE = 0x3D
+    _REG_PWR_MODE = 0x3E
+    _REG_SYS_TRIGGER = 0x3F
+    _REG_UNIT_SEL = 0x3B
+
+    _REG_QUA_DATA_W_LSB = 0x20  # W LSB, then W MSB, X LSB, X MSB, Y..., Z...
+    _REG_GYR_DATA_X_LSB = 0x14
+    _REG_LIA_DATA_X_LSB = 0x28  # linear accel (gravity removed)
+
+    _CHIP_ID = 0xA0
+
+    # OPR_MODE values
+    _MODE_CONFIG = 0x00
+    _MODE_NDOF = 0x0C
+
+    # PWR_MODE values
+    _PWR_NORMAL = 0x00
+
+    def __init__(
+        self,
+        i2c_bus: int = 1,
+        address: int = 0x28,  # common BNO055 I2C address (0x28 or 0x29 depending on ADR pin)
+        rate_hz: float = 100.0,
+        thread_name: str = "BNO055IMUReader",
+        # Velocity integrator knobs (same spirit as your JY901 class)
+        vel_leak: float = 0.0,
+        max_dt_s: float = 0.2,
+        vel_kf_accel_proc_std_m_s2: float = 3.0,
+        vel_kf_zero_meas_std_m_s: float = 0.15,
+        # Init/config
+        opr_mode: int = _MODE_NDOF,   # NDOF is the usual “best” fusion output
+        reset_on_start: bool = False, # can help if the chip is in a weird state
+        i2c_retries: int = 3,
+    ):
+        if SMBus is None:
+            raise ImportError(
+                "smbus2 is required for BNO055IMU. Install with: pip install smbus2 "
+                "(or apt: sudo apt-get install -y python3-smbus)"
+            )
+
+        self.i2c_bus = int(i2c_bus)
+        self.address = int(address)
+        self.rate_hz = float(rate_hz)
+        self.thread_name = thread_name
+        self.opr_mode = int(opr_mode)
+        self.reset_on_start = bool(reset_on_start)
+        self.i2c_retries = int(i2c_retries)
+
+        self.vel_leak = float(vel_leak)
+        self.max_dt_s = float(max_dt_s)
+        self.vel_kf_accel_proc_std_m_s2 = float(vel_kf_accel_proc_std_m_s2)
+        self.vel_kf_zero_meas_std_m_s = float(vel_kf_zero_meas_std_m_s)
+
+        self._bus: Optional[SMBus] = None
+        self._thread: Optional[threading.Thread] = None
+        self._stop_evt = threading.Event()
+
+        self._lock = threading.Lock()
+        self._latest_quat: Optional[QuaternionSample] = None
+        self._latest_ang_vel: Optional[VectorSample] = None
+        self._latest_lin_acc: Optional[VectorSample] = None
+        self._latest_lin_vel: Optional[VectorSample] = None
+
+        # Integration state
+        self._prev_lin_acc: Optional[Tuple[float, float, float, float]] = None  # ax,ay,az,t
+        self._vel_xyz = [0.0, 0.0, 0.0]
+        self._vel_var_xyz = [1.0, 1.0, 1.0]
+
+        self._stats_lock = threading.Lock()
+        self._reads_ok = 0
+        self._reads_bad = 0
+        self._last_read_ts = 0.0
+        self._lin_vel_updates = 0
+        self._lin_vel_skip_dt = 0
+        self._lin_vel_skip_no_prev = 0
+        self._lin_vel_kf_updates = 0
+
+    # ---------- public lifecycle ----------
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop_evt.clear()
+        self._bus = SMBus(self.i2c_bus)
+        self._init_device()
+        self._thread = threading.Thread(target=self._run, name=self.thread_name, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_evt.set()
+        t = self._thread
+        if t and t.is_alive():
+            t.join(timeout=1.0)
+        self._thread = None
+        if self._bus:
+            try:
+                self._bus.close()
+            except Exception:
+                pass
+        self._bus = None
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.stop()
+
+    # ---------- non-blocking getters ----------
+
+    def get_quaternion(self) -> Optional[QuaternionSample]:
+        with self._lock:
+            return self._latest_quat
+
+    def get_angular_velocity(self) -> Optional[VectorSample]:
+        """Body-frame angular velocity (rad/s)."""
+        with self._lock:
+            return self._latest_ang_vel
+
+    def get_linear_acceleration(self) -> Optional[VectorSample]:
+        """Body-frame linear acceleration (m/s^2), gravity removed (BNO055 LIA output)."""
+        with self._lock:
+            return self._latest_lin_acc
+
+    def get_linear_velocity(self) -> Optional[VectorSample]:
+        """Body-frame linear velocity (m/s), integrated from lin_acc (drifts!)."""
+        with self._lock:
+            return self._latest_lin_vel
+
+    def get_observation(self) -> ImuObservation:
+        with self._lock:
+            quat = self._latest_quat
+            ang = self._latest_ang_vel
+            acc = self._latest_lin_acc
+            vel = self._latest_lin_vel
+        ts = time.time()
+        return ImuObservation(quat=quat, ang_vel_rad_s=ang, lin_acc_m_s2=acc, lin_vel_m_s=vel, timestamp=ts)
+
+    def reset_velocity(self) -> None:
+        with self._lock:
+            self._vel_xyz = [0.0, 0.0, 0.0]
+            self._vel_var_xyz = [1.0, 1.0, 1.0]
+            self._latest_lin_vel = VectorSample(0.0, 0.0, 0.0, time.time())
+        self._prev_lin_acc = None
+
+    def get_stats(self) -> dict:
+        with self._stats_lock:
+            return {
+                "reads_ok": self._reads_ok,
+                "reads_bad": self._reads_bad,
+                "last_read_age_s": (time.time() - self._last_read_ts) if self._last_read_ts else None,
+                "lin_vel_updates": self._lin_vel_updates,
+                "lin_vel_skip_dt": self._lin_vel_skip_dt,
+                "lin_vel_skip_no_prev": self._lin_vel_skip_no_prev,
+                "lin_vel_kf_updates": self._lin_vel_kf_updates,
+                "rate_hz": self.rate_hz,
+                "max_dt_s": self.max_dt_s,
+                "vel_kf_accel_proc_std_m_s2": self.vel_kf_accel_proc_std_m_s2,
+                "vel_kf_zero_meas_std_m_s": self.vel_kf_zero_meas_std_m_s,
+                "i2c_bus": self.i2c_bus,
+                "address": hex(self.address),
+                "opr_mode": hex(self.opr_mode),
+            }
+
+    # ---------- internal: i2c helpers ----------
+
+    @staticmethod
+    def _i16(lsb: int, msb: int) -> int:
+        v = (msb << 8) | lsb
+        return v - 0x10000 if v & 0x8000 else v
+
+    def _read_bytes(self, reg: int, n: int) -> bytes:
+        assert self._bus is not None
+        last_exc: Optional[Exception] = None
+        for _ in range(max(1, self.i2c_retries)):
+            try:
+                data = self._bus.read_i2c_block_data(self.address, reg, n)
+                return bytes(data)
+            except Exception as e:
+                last_exc = e
+                time.sleep(0.002)
+        raise last_exc if last_exc else RuntimeError("I2C read failed")
+
+    def _write_u8(self, reg: int, val: int) -> None:
+        assert self._bus is not None
+        last_exc: Optional[Exception] = None
+        for _ in range(max(1, self.i2c_retries)):
+            try:
+                self._bus.write_byte_data(self.address, reg, val & 0xFF)
+                return
+            except Exception as e:
+                last_exc = e
+                time.sleep(0.002)
+        raise last_exc if last_exc else RuntimeError("I2C write failed")
+
+    def _init_device(self) -> None:
+        # Check chip id
+        try:
+            chip = self._read_bytes(self._REG_CHIP_ID, 1)[0]
+        except Exception:
+            chip = None
+
+        if chip != self._CHIP_ID:
+            # Some boards need a moment after power-up
+            time.sleep(0.7)
+            chip = self._read_bytes(self._REG_CHIP_ID, 1)[0]
+            if chip != self._CHIP_ID:
+                raise RuntimeError(f"BNO055 chip id mismatch: got {hex(chip)}, expected {hex(self._CHIP_ID)}")
+
+        if self.reset_on_start:
+            # Soft reset
+            self._write_u8(self._REG_SYS_TRIGGER, 0x20)
+            time.sleep(0.7)
+
+        # Switch to config mode before changing settings
+        self._write_u8(self._REG_OPR_MODE, self._MODE_CONFIG)
+        time.sleep(0.03)
+
+        # Normal power mode
+        self._write_u8(self._REG_PWR_MODE, self._PWR_NORMAL)
+        time.sleep(0.01)
+
+        # Units:
+        # We keep default units because many breakouts / firmwares vary, and conversion below
+        # assumes the common scale factors used in most libraries:
+        #   - gyro: 1 LSB = 1/16 deg/s
+        #   - linear accel: 1 LSB = 1/100 m/s^2  (OR 1 mg if configured that way)
+        #
+        # If you *know* your UNIT_SEL, set it here. Otherwise leave it unchanged.
+        # self._write_u8(self._REG_UNIT_SEL, <your bits>)
+
+        # Go to fusion mode (NDOF by default)
+        self._write_u8(self._REG_OPR_MODE, self.opr_mode)
+        time.sleep(0.05)
+
+    # ---------- internal: polling loop + conversions ----------
+
+    def _run(self) -> None:
+        period = 1.0 / max(1e-3, self.rate_hz)
+
+        while not self._stop_evt.is_set():
+            t0 = time.time()
+            try:
+                now = t0
+
+                # ---- Quaternion ----
+                # Datasheet: quaternion is signed int16 with scale 1/16384
+                qb = self._read_bytes(self._REG_QUA_DATA_W_LSB, 8)
+                qw = self._i16(qb[0], qb[1]) / 16384.0
+                qx = self._i16(qb[2], qb[3]) / 16384.0
+                qy = self._i16(qb[4], qb[5]) / 16384.0
+                qz = self._i16(qb[6], qb[7]) / 16384.0
+                with self._lock:
+                    self._latest_quat = QuaternionSample(w=qw, x=qx, y=qy, z=qz, timestamp=now, source="quat")
+
+                # ---- Gyro ----
+                # Common scale: 1 LSB = 1/16 deg/s (then -> rad/s)
+                gb = self._read_bytes(self._REG_GYR_DATA_X_LSB, 6)
+                gx_dps = self._i16(gb[0], gb[1]) / 16.0
+                gy_dps = self._i16(gb[2], gb[3]) / 16.0
+                gz_dps = self._i16(gb[4], gb[5]) / 16.0
+                gx = gx_dps * (math.pi / 180.0)
+                gy = gy_dps * (math.pi / 180.0)
+                gz = gz_dps * (math.pi / 180.0)
+                with self._lock:
+                    self._latest_ang_vel = VectorSample(gx, gy, gz, now)
+
+                # ---- Linear acceleration (gravity removed) ----
+                # Two common configs:
+                #   A) units m/s^2: 1 LSB = 1/100 m/s^2
+                #   B) units mg:    1 LSB = 1 mg = 0.00980665 m/s^2
+                #
+                # We default to the most common “m/s^2” scale used by many drivers.
+                # If your values look ~100x too big/small at rest/motion, flip this constant.
+                LIA_LSB_TO_M_S2 = 1.0 / 100.0  # try 0.00980665 if configured in mg
+
+                ab = self._read_bytes(self._REG_LIA_DATA_X_LSB, 6)
+                lax = self._i16(ab[0], ab[1]) * LIA_LSB_TO_M_S2
+                lay = self._i16(ab[2], ab[3]) * LIA_LSB_TO_M_S2
+                laz = self._i16(ab[4], ab[5]) * LIA_LSB_TO_M_S2
+                with self._lock:
+                    self._latest_lin_acc = VectorSample(lax, lay, laz, now)
+
+                # ---- Velocity integration (same approach as your JY901 class) ----
+                prev = self._prev_lin_acc
+                if prev is not None:
+                    pax, pay, paz, pt = prev
+                    dt = now - pt
+                    if 0.0 < dt <= self.max_dt_s:
+                        a_mid = (0.5 * (pax + lax), 0.5 * (pay + lay), 0.5 * (paz + laz))
+                        vx, vy, vz = self._vel_xyz
+                        pvx, pvy, pvz = self._vel_var_xyz
+                        v_list = [vx, vy, vz]
+                        p_list = [pvx, pvy, pvz]
+
+                        q_var = (max(1e-6, self.vel_kf_accel_proc_std_m_s2) * dt) ** 2
+                        r_var = max(1e-8, self.vel_kf_zero_meas_std_m_s) ** 2
+
+                        for i, a_i in enumerate(a_mid):
+                            v_pred = float(v_list[i]) + float(a_i) * float(dt)
+                            p_pred = float(p_list[i]) + float(q_var)
+
+                            if self.vel_leak > 0.0:
+                                decay = max(0.0, 1.0 - self.vel_leak * dt)
+                                v_pred *= decay
+
+                            k = p_pred / (p_pred + r_var)
+                            v_upd = (1.0 - k) * v_pred
+                            p_upd = max(1e-9, (1.0 - k) * p_pred)
+
+                            v_list[i] = float(v_upd)
+                            p_list[i] = float(p_upd)
+
+                        self._vel_xyz = [v_list[0], v_list[1], v_list[2]]
+                        self._vel_var_xyz = [p_list[0], p_list[1], p_list[2]]
+                        with self._lock:
+                            self._latest_lin_vel = VectorSample(self._vel_xyz[0], self._vel_xyz[1], self._vel_xyz[2], now)
+                        with self._stats_lock:
+                            self._lin_vel_updates += 1
+                            self._lin_vel_kf_updates += 1
+                    else:
+                        with self._stats_lock:
+                            self._lin_vel_skip_dt += 1
+                else:
+                    with self._lock:
+                        self._latest_lin_vel = VectorSample(self._vel_xyz[0], self._vel_xyz[1], self._vel_xyz[2], now)
+                    with self._stats_lock:
+                        self._lin_vel_skip_no_prev += 1
+
+                self._prev_lin_acc = (lax, lay, laz, now)
+
+                with self._stats_lock:
+                    self._reads_ok += 1
+                    self._last_read_ts = now
+
+            except Exception:
+                with self._stats_lock:
+                    self._reads_bad += 1
+                time.sleep(0.01)
+
+            # Sleep to maintain rate
+            dt_loop = time.time() - t0
+            to_sleep = period - dt_loop
+            if to_sleep > 0:
+                time.sleep(to_sleep)
+
+
+if __name__ == "__main__":
+    imu = BNO055IMU(i2c_bus=1, address=0x28, rate_hz=100.0, vel_leak=0.02)
+    imu.start()
+    try:
+        while True:
+            obs = imu.get_observation()
+            if obs.quat and obs.ang_vel_rad_s and obs.lin_acc_m_s2:
+                q = obs.quat
+                w = obs.ang_vel_rad_s
+                a = obs.lin_acc_m_s2
+                v = obs.lin_vel_m_s
+                print(
+                    f"q=({q.w:+.3f},{q.x:+.3f},{q.y:+.3f},{q.z:+.3f}) "
+                    f"w(rad/s)=({w.x:+.2f},{w.y:+.2f},{w.z:+.2f}) "
+                    f"a(m/s2)=({a.x:+.2f},{a.y:+.2f},{a.z:+.2f}) "
+                    f"v(m/s)=({(v.x if v else 0):+.2f},{(v.y if v else 0):+.2f},{(v.z if v else 0):+.2f})"
+                )
+            time.sleep(0.02)
+    finally:
+        imu.stop()

@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 import time
+import math
+from pathlib import Path
+import importlib.util
+from importlib.machinery import SourceFileLoader
 
 
 DEFAULT_BNO085_REPORTS: tuple[str, ...] = (
@@ -229,6 +233,183 @@ class JY901UARTIMU:
         return out
 
 
+class BNO055I2CIMU:
+    """
+    BNO055 I2C adapter that exposes the same read/read_dict interface.
+    Reuses the local IMU_BNO055 implementation file.
+    """
+
+    def __init__(
+        self,
+        *,
+        i2c_bus: int = 1,
+        address: int = 0x28,
+        rate_hz: float = 100.0,
+        vel_leak: float = 0.0,
+        max_dt_s: float = 0.2,
+        vel_kf_accel_proc_std_m_s2: float = 3.0,
+        vel_kf_zero_meas_std_m_s: float = 0.15,
+        opr_mode: int = 0x0C,
+        reset_on_start: bool = False,
+        i2c_retries: int = 3,
+        autostart: bool = True,
+        frame_yaw_deg: float = 0.0,
+    ) -> None:
+        self._imu = None
+        self._import_error: Optional[Exception] = None
+        self._frame_yaw_rad = math.radians(float(frame_yaw_deg))
+        try:
+            BNO055IMU = self._load_impl_class()
+            self._imu = BNO055IMU(
+                i2c_bus=int(i2c_bus),
+                address=int(address),
+                rate_hz=float(rate_hz),
+                vel_leak=float(vel_leak),
+                max_dt_s=float(max_dt_s),
+                vel_kf_accel_proc_std_m_s2=float(vel_kf_accel_proc_std_m_s2),
+                vel_kf_zero_meas_std_m_s=float(vel_kf_zero_meas_std_m_s),
+                opr_mode=int(opr_mode),
+                reset_on_start=bool(reset_on_start),
+                i2c_retries=int(i2c_retries),
+            )
+            if autostart:
+                self.start()
+        except Exception as exc:
+            self._import_error = exc
+
+    @staticmethod
+    def _load_impl_class():
+        impl_path = Path(__file__).with_name("IMU_BNO055")
+        if not impl_path.exists():
+            raise FileNotFoundError(f"Missing BNO055 implementation file: {impl_path}")
+        # IMU_BNO055 is an extensionless Python source file.
+        loader = SourceFileLoader("imu_bno055_impl", str(impl_path))
+        spec = importlib.util.spec_from_loader("imu_bno055_impl", loader)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Failed to load module from {impl_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        cls = getattr(module, "BNO055IMU", None)
+        if cls is None:
+            raise RuntimeError("BNO055IMU class not found in IMU_BNO055")
+        return cls
+
+    def start(self) -> None:
+        if self._imu is not None:
+            self._imu.start()
+
+    def stop(self) -> None:
+        if self._imu is not None:
+            self._imu.stop()
+
+    @property
+    def available(self) -> bool:
+        return self._imu is not None
+
+    @property
+    def last_error(self) -> Optional[str]:
+        if self._import_error is not None:
+            return f"{type(self._import_error).__name__}: {self._import_error}"
+        return None
+
+    def _rotate_vec_sensor_to_robot(self, vec: Optional[Tuple[float, float, float]]) -> Optional[Tuple[float, float, float]]:
+        if vec is None:
+            return None
+        x, y, z = float(vec[0]), float(vec[1]), float(vec[2])
+        if abs(self._frame_yaw_rad) < 1e-12:
+            return (x, y, z)
+        c = float(math.cos(self._frame_yaw_rad))
+        s = float(math.sin(self._frame_yaw_rad))
+        # Sensor -> robot frame rotation around +Z by frame_yaw_deg.
+        xr = c * x - s * y
+        yr = s * x + c * y
+        return (xr, yr, z)
+
+    @staticmethod
+    def _quat_xyzw_mul(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
+        ax, ay, az, aw = a
+        bx, by, bz, bw = b
+        return (
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz,
+        )
+
+    @staticmethod
+    def _quat_xyzw_conj(q: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
+        x, y, z, w = q
+        return (-x, -y, -z, w)
+
+    def _map_quaternion_sensor_to_robot(
+        self, q_xyzw_sensor: Optional[Tuple[float, float, float, float]]
+    ) -> Optional[Tuple[float, float, float, float]]:
+        if q_xyzw_sensor is None:
+            return None
+        if abs(self._frame_yaw_rad) < 1e-12:
+            return q_xyzw_sensor
+        half = 0.5 * self._frame_yaw_rad
+        # q_rs: sensor->robot rotation around +Z.
+        q_rs = (0.0, 0.0, float(math.sin(half)), float(math.cos(half)))
+        # q_sr is inverse of q_rs.
+        q_sr = self._quat_xyzw_conj(q_rs)
+        # q_ws (sensor->world) -> q_wr (robot->world): q_wr = q_ws * q_sr
+        return self._quat_xyzw_mul(q_xyzw_sensor, q_sr)
+
+    def read(self) -> IMUState:
+        if self._imu is None:
+            return IMUState(timestamp_s=time.time())
+        obs = self._imu.get_observation()
+        quat = obs.quat
+        ang = obs.ang_vel_rad_s
+        lin_acc = obs.lin_acc_m_s2
+        lin_vel = obs.lin_vel_m_s
+
+        quaternion_xyzw = None
+        if quat is not None:
+            # BNO055 implementation exposes wxyz; controller expects xyzw.
+            q_sensor = (float(quat.x), float(quat.y), float(quat.z), float(quat.w))
+            quaternion_xyzw = self._map_quaternion_sensor_to_robot(q_sensor)
+
+        gyro_rads = None
+        if ang is not None:
+            gyro_rads = self._rotate_vec_sensor_to_robot((float(ang.x), float(ang.y), float(ang.z)))
+
+        linear_acceleration_mps2 = None
+        if lin_acc is not None:
+            linear_acceleration_mps2 = self._rotate_vec_sensor_to_robot(
+                (float(lin_acc.x), float(lin_acc.y), float(lin_acc.z))
+            )
+
+        linear_velocity_mps = None
+        if lin_vel is not None:
+            linear_velocity_mps = self._rotate_vec_sensor_to_robot((float(lin_vel.x), float(lin_vel.y), float(lin_vel.z)))
+
+        calibration: Optional[Dict[str, Any]] = None
+        if hasattr(self._imu, "get_stats"):
+            try:
+                calibration = {"stats": self._imu.get_stats()}
+            except Exception:
+                calibration = None
+
+        return IMUState(
+            timestamp_s=float(obs.timestamp),
+            quaternion_xyzw=quaternion_xyzw,
+            gyro_rads=gyro_rads,
+            linear_velocity_mps=linear_velocity_mps,
+            linear_acceleration_mps2=linear_acceleration_mps2,
+            calibration=calibration,
+        )
+
+    def read_dict(self) -> Dict[str, Any]:
+        state = self.read()
+        out = state.as_dict()
+        out["available"] = self.available
+        out["error"] = self.last_error
+        out["frame_yaw_deg"] = float(math.degrees(self._frame_yaw_rad))
+        return out
+
+
 class MockIMU:
     def __init__(
         self,
@@ -295,7 +476,7 @@ class MockIMU:
 class IMU:
     """
     Parent IMU selector used by LeRobot.
-    - sensor: "bno085" or "jy901"
+    - sensor: "bno085", "bno055", or "jy901"
     - mock=True forces mock values regardless of selected sensor
     """
 
@@ -321,7 +502,23 @@ class IMU:
                 autostart=bool(self._sensor_kwargs.get("autostart", True)),
             )
             return
-        raise ValueError("Unsupported IMU sensor. Use 'bno085' or 'jy901'.")
+        if self.sensor == "bno055":
+            self._sensor_backend = BNO055I2CIMU(
+                i2c_bus=int(self._sensor_kwargs.get("i2c_bus", 1)),
+                address=int(self._sensor_kwargs.get("address", 0x28)),
+                rate_hz=float(self._sensor_kwargs.get("rate_hz", 100.0)),
+                vel_leak=float(self._sensor_kwargs.get("vel_leak", 0.0)),
+                max_dt_s=float(self._sensor_kwargs.get("max_dt_s", 0.2)),
+                vel_kf_accel_proc_std_m_s2=float(self._sensor_kwargs.get("vel_kf_accel_proc_std_m_s2", 3.0)),
+                vel_kf_zero_meas_std_m_s=float(self._sensor_kwargs.get("vel_kf_zero_meas_std_m_s", 0.15)),
+                opr_mode=int(self._sensor_kwargs.get("opr_mode", 0x0C)),
+                reset_on_start=bool(self._sensor_kwargs.get("reset_on_start", False)),
+                i2c_retries=int(self._sensor_kwargs.get("i2c_retries", 3)),
+                autostart=bool(self._sensor_kwargs.get("autostart", True)),
+                frame_yaw_deg=float(self._sensor_kwargs.get("frame_yaw_deg", 0.0)),
+            )
+            return
+        raise ValueError("Unsupported IMU sensor. Use 'bno085', 'bno055', or 'jy901'.")
 
     def use_sensor(self, sensor: str, **sensor_kwargs: Any) -> None:
         self.stop()
