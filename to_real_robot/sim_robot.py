@@ -840,15 +840,40 @@ class SimBipedalRobotController:
     def _sync_state_from_sim(self, stamp_s: float) -> None:
         q_deg = self._read_joint_q_deg()
         qd_deg_s = self._read_joint_qd_deg_s()
+        tau_joint_nm = self._read_joint_torque_nm()
         motor_raw = self.joint_state_to_motor_state(q_deg, input_radians=False, output_space="raw")
         motor_qd_raw = self._joint_vel_deg_to_motor_raw(qd_deg_s)
+        
+        # Convert joint-space torques to motor space
+        motor_tau_raw: Dict[int, float] = {}
+        # Direct mapping (non-ankle) joints
+        direct_map = {0: 1, 1: 2, 2: 3, 3: 4, 6: 7, 7: 8, 8: 9, 9: 10}
+        for qi, mid in direct_map.items():
+            s = float(self.motor_sign[mid])
+            motor_tau_raw[mid] = float(tau_joint_nm[qi] * s)
+        
+        # Ankle coupling (left side)
+        sp_l = float(ANKLE_COUPLING_CALIBRATION_LEFT["pitch"]["sign"])
+        sr_l = float(ANKLE_COUPLING_CALIBRATION_LEFT["roll"]["sign"])
+        s5 = float(self.motor_sign[5])
+        s6 = float(self.motor_sign[6])
+        motor_tau_raw[5] = float(s5 * (0.5 * sp_l * tau_joint_nm[4] + 0.5 * sr_l * tau_joint_nm[5]))
+        motor_tau_raw[6] = float(s6 * (-0.5 * sp_l * tau_joint_nm[4] + 0.5 * sr_l * tau_joint_nm[5]))
+        
+        # Ankle coupling (right side)
+        sp_r = float(ANKLE_COUPLING_CALIBRATION_RIGHT["pitch"]["sign"])
+        sr_r = float(ANKLE_COUPLING_CALIBRATION_RIGHT["roll"]["sign"])
+        s11 = float(self.motor_sign[11])
+        s12 = float(self.motor_sign[12])
+        motor_tau_raw[11] = float(s11 * (0.5 * sp_r * tau_joint_nm[10] + 0.5 * sr_r * tau_joint_nm[11]))
+        motor_tau_raw[12] = float(s12 * (-0.5 * sp_r * tau_joint_nm[10] + 0.5 * sr_r * tau_joint_nm[11]))
 
         with self._state_lock:
             for mid in MOTOR_IDS:
                 self.state[mid] = MotorState(
                     position_deg=float(motor_raw[mid]),
                     velocity_deg_s=float(motor_qd_raw[mid]),
-                    torque_nm=0.0,
+                    torque_nm=float(motor_tau_raw.get(mid, 0.0)),
                     temp_mos_c=35.0,
                     stamp=float(stamp_s),
                 )
@@ -969,6 +994,11 @@ class SimBipedalRobotController:
 
     def _read_joint_qd_deg_s(self) -> np.ndarray:
         return np.rad2deg(np.asarray([self.data.qvel[adr] for adr in self._joint_dof_adr], dtype=float))
+
+    def _read_joint_torque_nm(self) -> np.ndarray:
+        """Read joint-space torques from MuJoCo actuator forces."""
+        tau_joint = np.asarray([self.data.qfrc_actuator[adr] for adr in self._joint_dof_adr], dtype=float)
+        return tau_joint
 
     def _joint_index_map(self) -> Dict[str, Dict[str, int]]:
         return {

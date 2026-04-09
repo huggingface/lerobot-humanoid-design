@@ -440,16 +440,6 @@ robot.attach_default_meshcat()   # optional
 robot.set_max_command_delta(60.0)
 robot.start(mode="state_only", auto_enable=False)
 import time
-while True:
-    print(imu.read_dict()["gyro_rads"])
-    time.sleep(0.1)
-for mid in range(1, 13):
-    robot.set_joint_limit(mid, -720.0, 720.0)
-robot.set_max_command_delta(1000.0)
-
-robot.start(mode="control", auto_enable=True)
-robot.request_state_once()      # ensure valid stamps
-robot.enforce_command_limits = False
 
 robot._viz_hz = 20.0            # reduce lag a lot
 
@@ -473,6 +463,7 @@ right={
 )
 robot.set_mode("control")
 
+robot.enable_all()
 
 for mid in [1,7]:
     robot.set_joint_gains(mid, kp=30, kd=3.0) 
@@ -501,9 +492,9 @@ pad.start()
 
 agent = RLAgent.from_files(
     robot,
-    config_path="RL_policy/less_noice_high_gain_torque_obs/config.yaml",
-    policy_path="RL_policy/less_noice_high_gain_torque_obs/policy.onnx", #2026-03-04_17-28-46.onnx",
-    log_path="RL_policy/less_noice_high_gain_torque_obs/debug_ctrl5.csv",
+    config_path="RL_policy/less_noice_high_gain_torque_obs_new_model/config.yaml",
+    policy_path="RL_policy/less_noice_high_gain_torque_obs_new_model/policy.onnx", #2026-03-04_17-28-46.onnx",
+    log_path="RL_policy/less_noice_high_gain_torque_obs_new_model/debug_ctrl5.csv",
     log_observation=True,
     log_action=True,
     log_every_n=1,
