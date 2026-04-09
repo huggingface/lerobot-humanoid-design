@@ -64,17 +64,18 @@ from rl_agent import RLAgent
 robot = SimBipedalRobotController(control_hz=200.0)
 robot.start(mode="control", auto_enable=True)
 robot.start_viewer()   # opens MuJoCo viewer window
-
+# NOTE: sim gains are baked into the MJCF <actuator> section — set_joint_gains() is a no-op.
+# Call robot.set_joint_gains(1) to inspect what kp/kv the loaded model actually uses.
 agent = RLAgent.from_files(
     robot,
-    config_path="policies/less_noise_high_gain_torque_obs/config.yaml",
-    policy_path="policies/less_noise_high_gain_torque_obs/policy.onnx",
-    log_path="policies/less_noise_high_gain_torque_obs/sim_debug.csv",
+    config_path="policies/less_noise_high_gain/config.yaml",
+    policy_path="policies/less_noise_high_gain/policy.onnx",
+    log_path="policies/less_noise_high_gain/sim_debug.csv",
     log_observation=True,
     log_action=True,
     log_every_n=1,
 )
-agent.spec.action_scale = 1.0
+agent.spec.action_scale = 0.1
 agent.start()
 
 # agent.stop(); robot.stop()
@@ -88,15 +89,17 @@ robot = SimBipedalRobotController(control_hz=200.0, fixed_base=True)
 robot.start(mode="control", auto_enable=True)
 robot.start_viewer()
 
-# Send a standing pose (degrees, model space)
+# Send the knees-bent reference pose (degrees, model space — same as reset pose).
+# After reset, action is already latched to this pose → torques ≈ 0 at equilibrium.
+import numpy as np
 robot.set_action(
     left={
-        "hipz": 0.0, "hipx": 0.0, "hipy": -20.0535,
-        "knee": 40.107, "ankle_pitch": -20.0535, "ankle_roll": 0.0,
+        "hipz": 0.0, "hipx": 0.0, "hipy": float(np.rad2deg(-20.0535)),
+        "knee": float(np.rad2deg(40.1070)), "ankle_pitch": float(np.rad2deg(-20.0535)), "ankle_roll": 0.0,
     },
     right={
-        "hipz": 0.0, "hipx": 0.0, "hipy":  20.0535,
-        "knee": 40.107, "ankle_pitch":  20.0535, "ankle_roll": 0.0,
+        "hipz": 0.0, "hipx": 0.0, "hipy": float(np.rad2deg(20.0535)),
+        "knee": float(np.rad2deg(40.1070)), "ankle_pitch": float(np.rad2deg(20.0535)), "ankle_roll": 0.0,
     },
 )
 
@@ -190,13 +193,16 @@ agent.start()
 # 4. UTILITIES
 # =============================================================================
 
-# --- PD gains (reference: SIM_PD_GAINS_BY_MOTOR_ID in sim_robot.py) ---
+# --- PD gains ---
+# Real robot: set_joint_gains() works (sent over CAN).
+# Sim: gains are baked into the MJCF <actuator> section — set_joint_gains() prints the
+#      actual value and warns; to change them, edit the scene XML and reload.
 
-for mid in [1, 7]:    robot.set_joint_gains(mid, kp=40,  kd=1.0)   # hipz
-for mid in [2, 8]:    robot.set_joint_gains(mid, kp=110, kd=1.0)   # hipx
-for mid in [3, 9]:    robot.set_joint_gains(mid, kp=110, kd=1.0)   # hipy
-for mid in [4, 10]:   robot.set_joint_gains(mid, kp=110, kd=1.0)   # knee
-for mid in [5, 6, 11, 12]: robot.set_joint_gains(mid, kp=60, kd=2.0)  # ankles
+for mid in [1, 7]:    robot.set_joint_gains(mid, kp=30,  kd=3.0)   # hipz
+for mid in [2, 8]:    robot.set_joint_gains(mid, kp=40, kd=3.0)   # hipx
+for mid in [3, 9]:    robot.set_joint_gains(mid, kp=60, kd=4.0)   # hipy
+for mid in [4, 10]:   robot.set_joint_gains(mid, kp=60, kd=4.0)   # knee
+for mid in [5, 6, 11, 12]: robot.set_joint_gains(mid, kp=20, kd=1.5)  # ankles
 
 
 # --- inspect current state ---

@@ -142,16 +142,15 @@ def _extract_policy_terms(cfg: Dict[str, Any]) -> List[str]:
 
 
 def _canonicalize_policy_terms(policy_terms: List[str]) -> List[str]:
-    terms = [str(t) for t in policy_terms]
-    terms_set = set(terms)
-    canonical_sets = (
-        ["base_lin_vel", "base_ang_vel", "projected_gravity", "joint_pos", "joint_vel", "actions", "command"],
-        ["base_ang_vel", "projected_gravity", "joint_pos", "joint_vel", "actions", "command"],
-    )
-    for canonical in canonical_sets:
-        if terms_set == set(canonical):
-            return [t for t in canonical if t in terms_set]
-    return terms
+    """Return observation term order matching training.
+
+    MJLab's ``yaml.dump()`` writes keys in alphabetical order, and the
+    training observation manager iterates them in that same order (confirmed
+    by comparing MJLab play-mode obs traces against the YAML config).
+    So the YAML key order (alphabetical) IS the correct training order —
+    no reordering needed.
+    """
+    return [str(t) for t in policy_terms]
 
 
 def _extract_action_keys(cfg: Dict[str, Any]) -> List[str]:
@@ -360,9 +359,10 @@ def infer_agent_spec(cfg: Dict[str, Any]) -> AgentSpec:
     ).strip().lower()
     if joint_vel_source in ("fd", "finite_difference", "finite_differences"):
         joint_vel_source = "finite_diff"
-    if joint_vel_source in ("snapshot", "joint_state", "joint_state_fd_fallback"):
+    if joint_vel_source in ("joint_state", "joint_state_fd_fallback"):
         joint_vel_source = "auto"
-    if joint_vel_source not in ("auto", "finite_diff"):
+    # "snapshot" = pure MuJoCo/sensor velocity (matches training); keep it distinct from "auto"
+    if joint_vel_source not in ("auto", "finite_diff", "snapshot"):
         joint_vel_source = "auto"
 
     return AgentSpec(
@@ -667,10 +667,9 @@ class RLAgent:
         self.obs_history.clear()
         self._prev_q_rad = None
         self._prev_q_t_s = None
-        if self._default_joint_pos_rad is not None:
-            self._prev_obs_joint_pos = (-self._default_joint_pos_rad).astype(np.float32, copy=True)
-        else:
-            self._prev_obs_joint_pos = None
+        # One-step delay buffers: match MJLab training reset which initializes
+        # all delayed observations to zeros (init_state.joint_pos - default = 0).
+        self._prev_obs_joint_pos = np.zeros(12, dtype=np.float32)
         self._curr_obs_joint_pos = None
         self._prev_obs_joint_vel = np.zeros(12, dtype=np.float32)
         self._curr_obs_joint_vel = None
@@ -779,6 +778,8 @@ class RLAgent:
                 return self._prev_obs_joint_pos.astype(np.float32, copy=False)
             if self.spec.joint_vel_source == "finite_diff":
                 qd_now = qd_fd.astype(np.float32, copy=False)
+            elif self.spec.joint_vel_source == "snapshot":
+                qd_now = qd_snap.astype(np.float32, copy=False)
             else:
                 qd_now = (0.5 * qd_snap + 0.5 * qd_fd).astype(np.float32, copy=False)
             qd_now = self._apply_obs_term_scale(term_name, qd_now)

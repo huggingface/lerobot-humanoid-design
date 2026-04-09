@@ -30,23 +30,23 @@ try:
 except Exception:  # pragma: no cover - optional runtime dependency
     mj_viewer = None
 
-DEFAULT_MJCF_PATH = Path("bipedal_plateform_no_arms/mjcf/sim_scene_safe.xml")
+DEFAULT_MJCF_PATH = Path(__file__).resolve().parent / "bipedal_plateform_no_arms" / "mjcf" / "sim_scene.xml"
 
 # PD gains tuned for MuJoCo sim (from lerobot_humanoid_no_arms_constants.py).
 # These are higher than real-robot gains because the sim uses position actuators.
 SIM_PD_GAINS_BY_MOTOR_ID: Dict[int, tuple[float, float]] = {
-    1:  (40.0,  1.0),   # hipz_left
-    2:  (110.0, 1.0),   # hipx_left
-    3:  (110.0, 1.0),   # hipy_left
-    4:  (110.0, 1.0),   # knee_left
-    5:  (60.0,  2.0),   # ankle_a left
-    6:  (60.0,  2.0),   # ankle_b left
-    7:  (40.0,  1.0),   # hipz_right
-    8:  (110.0, 1.0),   # hipx_right
-    9:  (110.0, 1.0),   # hipy_right
-    10: (110.0, 1.0),   # knee_right
-    11: (60.0,  2.0),   # ankle_a right
-    12: (60.0,  2.0),   # ankle_b right
+    1:  (30.0,  3.0),   # hipz_left
+    2:  (40.0,  3.0),   # hipx_left
+    3:  (60.0,  4.0),   # hipy_left
+    4:  (60.0,  4.0),   # knee_left
+    5:  (20.0,  1.5),   # ankle_a left
+    6:  (20.0,  1.5),   # ankle_b left
+    7:  (30.0,  3.0),   # hipz_right
+    8:  (40.0,  3.0),   # hipx_right
+    9:  (60.0,  4.0),   # hipy_right
+    10: (60.0,  4.0),   # knee_right
+    11: (20.0,  1.5),   # ankle_a right
+    12: (20.0,  1.5),   # ankle_b right
 }
 LEROBOT_SIM_GAINS_BY_MOTOR_ID = SIM_PD_GAINS_BY_MOTOR_ID  # backward-compat alias
 
@@ -131,6 +131,7 @@ class SimBipedalRobotController:
         use_lerobot_reference: bool = True,
         fixed_base: bool = False,
         fixed_base_height_m: float = 0.77,
+        fixed_base_quat_wxyz: Optional[tuple] = None,
         hardcode_mjlab_spawn: bool = True,
         hardcode_mjlab_spawn_with_qvel: bool = False,
         auto_reset_on_divergence: bool = False,
@@ -160,6 +161,9 @@ class SimBipedalRobotController:
         self._has_free_base = bool(self.model.nq >= 7 and self.model.nv >= 6)
         self._fixed_base = bool(fixed_base and self._has_free_base)
         self._fixed_base_height_m = float(fixed_base_height_m)
+        _q = np.asarray(fixed_base_quat_wxyz, dtype=float) if fixed_base_quat_wxyz is not None else np.array([1.0, 0.0, 0.0, 0.0])
+        _qn = float(np.linalg.norm(_q))
+        self._fixed_base_quat_wxyz: np.ndarray = _q / _qn if _qn > 1e-9 else np.array([1.0, 0.0, 0.0, 0.0])
         self._hardcode_mjlab_spawn = bool(hardcode_mjlab_spawn and self._has_free_base)
         self._hardcode_mjlab_spawn_with_qvel = bool(hardcode_mjlab_spawn_with_qvel)
         self._auto_reset_on_divergence = bool(auto_reset_on_divergence)
@@ -228,6 +232,7 @@ class SimBipedalRobotController:
         self._joint_qpos_adr = [int(self.model.jnt_qposadr[jid]) for jid in self._joint_id_order]
         self._joint_dof_adr = [int(self.model.jnt_dofadr[jid]) for jid in self._joint_id_order]
         self._joint_order_motor_ids = tuple(MOTOR_IDS)
+        self._joint_torque_nm = np.zeros(12, dtype=float)  # actuator torques in joint order
         self._actuator_index_by_motor_id = self._build_position_actuator_map()
         self._has_position_actuators = len(self._actuator_index_by_motor_id) == len(MOTOR_IDS)
         if not self._has_position_actuators:
@@ -267,8 +272,25 @@ class SimBipedalRobotController:
         self.mode = mode
 
     def set_joint_gains(self, motor_id: int, *, kp: Optional[float] = None, kd: Optional[float] = None) -> None:
-        g = self.gains[int(motor_id)]
-        self.gains[int(motor_id)] = JointGains(g.kp if kp is None else float(kp), g.kd if kd is None else float(kd))
+        """Gains are baked into the MJCF actuator elements and cannot be changed at runtime.
+
+        This method reads and prints the actual kp/kv from the loaded model so you can
+        confirm what the sim is using. To change gains, edit the <actuator> section of the
+        scene XML and reload the model.
+        """
+        mid = int(motor_id)
+        aid = self._actuator_index_by_motor_id.get(mid)
+        if aid is None:
+            print(f"[SimRobot][WARN] set_joint_gains: motor_id={mid} has no actuator mapping")
+            return
+        actual_kp = float(self.model.actuator_gainprm[aid, 0])
+        actual_kv = -float(self.model.actuator_biasprm[aid, 2])
+        print(
+            f"[SimRobot][WARN] set_joint_gains: gains are read-only in sim (baked into MJCF). "
+            f"motor_id={mid} actual kp={actual_kp:.1f}, kv={actual_kv:.3f}  "
+            f"(requested kp={kp}, kd={kd} — ignored). "
+            f"Edit the <actuator> section in {self.mjcf_path} to change gains."
+        )
 
     def set_joint_limit(self, motor_id: int, lo_deg: float, hi_deg: float) -> None:
         self.command_limits_cal_deg[int(motor_id)] = (float(lo_deg), float(hi_deg))
@@ -341,15 +363,17 @@ class SimBipedalRobotController:
             pos_raw = self.joint_state_to_motor_state(q_cmd_deg, input_radians=False, output_space="raw")
             vel_raw, tau_raw = self._joint_vel_tau_to_motor_raw(qd_cmd_deg_s, tau_cmd_nm)
 
+            proposed = {mid: cmd for mid, cmd in self.action.items()}
             for mid in MOTOR_IDS:
-                prev = self.action[mid]
-                self.action[mid] = MotorCommand(
+                prev = proposed[mid]
+                proposed[mid] = MotorCommand(
                     position_deg=float(pos_raw[mid]),
                     velocity_deg_s=float(vel_raw[mid]),
                     torque_nm=float(tau_raw[mid]),
                     kp=prev.kp if kp is None else float(kp),
                     kd=prev.kd if kd is None else float(kd),
                 )
+            self.action = proposed
             self._debug(
                 "set_action",
                 "received set_action "
@@ -379,6 +403,7 @@ class SimBipedalRobotController:
             motor_snapshot = {mid: asdict(st) for mid, st in self.state.items()}
             qd_deg_s = np.asarray(self.joint_velocity_deg_s, dtype=float).copy()
             qd_rad_s = np.asarray(self.joint_velocity_rad_s, dtype=float).copy()
+            joint_torque_nm = self._joint_torque_nm.copy()
         out: Dict[str, Any] = {
             "time_s": time.time(),
             "mode": self.mode,
@@ -404,10 +429,9 @@ class SimBipedalRobotController:
         }
         if include_joint_state:
             raw = {mid: float(motor_snapshot[mid]["position_deg"]) for mid in MOTOR_IDS}
-            tau_raw = {mid: float(motor_snapshot[mid]["torque_nm"]) for mid in MOTOR_IDS}
             out["joint_state_rad"] = self.motor_state_to_joint_state(raw, output_radians=True, nq=12).tolist()
             out["joint_state_deg"] = self.motor_state_to_joint_state(raw, output_radians=False, nq=12).tolist()
-            out["joint_torque_nm"] = self.motor_torque_to_joint_torque(tau_raw, nq=12).tolist()
+            out["joint_torque_nm"] = joint_torque_nm.tolist()
             out["joint_velocity_deg_s"] = qd_deg_s.tolist()
             out["joint_velocity_rad_s"] = qd_rad_s.tolist()
         return out
@@ -581,6 +605,13 @@ class SimBipedalRobotController:
                         self.data.qfrc_applied[:] = 0.0
                         if self.data.ctrl.size:
                             self.data.ctrl[:] = 0.0
+                    if self._fixed_base and self._has_free_base:
+                        # Cancel gravitational/Coriolis bias at the free-joint DOFs so the
+                        # base behaves as a true rigid anchor.  Without this the base free-falls
+                        # during mj_step and is merely teleported back afterwards; in that
+                        # free-fall frame the leg joints see zero gravitational load and the
+                        # actuator torques are ~20x too small.
+                        self.data.qfrc_applied[0:6] = -self.data.qfrc_bias[0:6]
                     for _ in range(steps_per_tick):
                         mujoco.mj_step(self.model, self.data)
                         self._sim_step_count += 1
@@ -734,10 +765,17 @@ class SimBipedalRobotController:
                 self.data.qpos[1] = 0.0
                 self.data.qpos[2] = float(self._fixed_base_height_m if self._fixed_base else self._initial_height_m)
                 # Free-joint quaternion in MuJoCo qpos is [w, x, y, z].
-                self.data.qpos[3] = 1.0
-                self.data.qpos[4] = 0.0
-                self.data.qpos[5] = 0.0
-                self.data.qpos[6] = 0.0
+                if self._fixed_base:
+                    q = self._fixed_base_quat_wxyz
+                    self.data.qpos[3] = float(q[0])
+                    self.data.qpos[4] = float(q[1])
+                    self.data.qpos[5] = float(q[2])
+                    self.data.qpos[6] = float(q[3])
+                else:
+                    self.data.qpos[3] = 1.0
+                    self.data.qpos[4] = 0.0
+                    self.data.qpos[5] = 0.0
+                    self.data.qpos[6] = 0.0
         if self._use_lerobot_reference:
             for jn, val in LEROBOT_KNEES_BENT_REF_POSE_RAD.items():
                 jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, jn)
@@ -754,10 +792,11 @@ class SimBipedalRobotController:
         self.data.qpos[0] = 0.0
         self.data.qpos[1] = 0.0
         self.data.qpos[2] = float(self._fixed_base_height_m)
-        self.data.qpos[3] = 1.0
-        self.data.qpos[4] = 0.0
-        self.data.qpos[5] = 0.0
-        self.data.qpos[6] = 0.0
+        q = self._fixed_base_quat_wxyz
+        self.data.qpos[3] = float(q[0])  # qw
+        self.data.qpos[4] = float(q[1])  # qx
+        self.data.qpos[5] = float(q[2])  # qy
+        self.data.qpos[6] = float(q[3])  # qz
         self.data.qvel[0:6] = 0.0
 
     def _sim_diverged_locked(self) -> bool:
@@ -853,15 +892,24 @@ class SimBipedalRobotController:
         motor_raw = self.joint_state_to_motor_state(q_deg, input_radians=False, output_space="raw")
         motor_qd_raw = self._joint_vel_deg_to_motor_raw(qd_deg_s)
 
+        # Read actuator torques from MuJoCo (qfrc_actuator = generalized force
+        # at each DOF from all actuators combined).
+        joint_tau = np.asarray(
+            [float(self.data.qfrc_actuator[adr]) for adr in self._joint_dof_adr],
+            dtype=float,
+        )
+
+        mid_to_tau = {mid: float(joint_tau[i]) for i, mid in enumerate(self._joint_order_motor_ids)}
         with self._state_lock:
             for mid in MOTOR_IDS:
                 self.state[mid] = MotorState(
                     position_deg=float(motor_raw[mid]),
                     velocity_deg_s=float(motor_qd_raw[mid]),
-                    torque_nm=0.0,
+                    torque_nm=mid_to_tau.get(mid, 0.0),
                     temp_mos_c=35.0,
                     stamp=float(stamp_s),
                 )
+            self._joint_torque_nm = joint_tau
             self.joint_velocity_deg_s = np.asarray(qd_deg_s, dtype=float).copy()
             self.joint_velocity_rad_s = np.deg2rad(self.joint_velocity_deg_s)
 
