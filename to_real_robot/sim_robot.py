@@ -242,7 +242,7 @@ class SimBipedalRobotController:
             dtype=float,
         )
 
-        self._imu_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "imu")
+        self._imu_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "torso")
         self._sensor_slices = self._build_sensor_slices()
 
         with self._sim_lock:

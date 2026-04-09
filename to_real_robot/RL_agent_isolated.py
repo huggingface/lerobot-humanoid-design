@@ -676,10 +676,7 @@ class RLAgent:
         self.obs_history.clear()
         self._prev_q_rad = None
         self._prev_q_t_s = None
-        if self._default_joint_pos_rad is not None:
-            self._prev_obs_joint_pos = (-self._default_joint_pos_rad).astype(np.float32, copy=True)
-        else:
-            self._prev_obs_joint_pos = None
+        self._prev_obs_joint_pos = None
         self._curr_obs_joint_pos = None
         self._prev_obs_joint_vel = np.zeros(12, dtype=np.float32)
         self._curr_obs_joint_vel = None
@@ -786,18 +783,14 @@ class RLAgent:
                 qpos_now = (q_rad - self._default_joint_pos_rad).astype(np.float32, copy=False)
                 qpos_now = self._apply_obs_term_scale(term_name, qpos_now)
                 self._curr_obs_joint_pos = qpos_now.copy()
-                if self._prev_obs_joint_pos is None:
-                    return qpos_now
-                return self._prev_obs_joint_pos.astype(np.float32, copy=False)
+                return qpos_now
             if self.spec.joint_vel_source == "finite_diff":
                 qd_now = qd_fd.astype(np.float32, copy=False)
             else:
                 qd_now = (0.5 * qd_snap + 0.5 * qd_fd).astype(np.float32, copy=False)
             qd_now = self._apply_obs_term_scale(term_name, qd_now)
             self._curr_obs_joint_vel = qd_now.copy()
-            if self._prev_obs_joint_vel is None:
-                return np.zeros_like(qd_now, dtype=np.float32)
-            return self._prev_obs_joint_vel.astype(np.float32, copy=False)
+            return qd_now
         if term_name in JOINT_TORQUE_TERM_NAMES:
             tau_now = self._policy_order_joint_state(snapshot, "joint_torque_nm").astype(np.float32, copy=False)
             tau_now = self._apply_obs_term_scale(term_name, tau_now)
