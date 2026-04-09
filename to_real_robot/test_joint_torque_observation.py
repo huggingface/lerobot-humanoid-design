@@ -30,9 +30,12 @@ from RL_agent import POLICY_BLOCK_ACTION_KEYS_12
 from RL_agent import RLAgent as MainRLAgent
 from RL_agent import _extract_onnx_joint_action_keys
 from RL_agent import _default_action_keys
+from RL_agent import _load_config as load_main_config
+from RL_agent import infer_agent_spec as infer_main_agent_spec
 from RL_agent_isolated import AgentSpec as IsolatedAgentSpec
 from RL_agent_isolated import POLICY_ACTION_KEYS as ISOLATED_POLICY_ACTION_KEYS
 from RL_agent_isolated import RLAgent as IsolatedRLAgent
+from RL_agent_isolated import infer_agent_spec as infer_isolated_agent_spec
 from bipedal_robot import BipedalRobotController
 from leg_test.mit import MotorState
 from root_constant import ANKLE_COUPLING_CALIBRATION_LEFT, ANKLE_COUPLING_CALIBRATION_RIGHT, MOTOR_IDS
@@ -44,6 +47,25 @@ class _DummyPolicy:
 
 class _DummyRobot:
     pass
+
+
+class _CaptureRobot:
+    def __init__(self) -> None:
+        self.last_left: dict[str, float] | None = None
+        self.last_right: dict[str, float] | None = None
+
+    def set_action(self, *, left: dict[str, float], right: dict[str, float]) -> dict[str, float]:
+        self.last_left = dict(left)
+        self.last_right = dict(right)
+        return {}
+
+    def get_combined_state_snapshot(self, *, include_joint_state: bool = True) -> dict[str, object]:
+        _ = include_joint_state
+        return {
+            "joint_state_deg": [0.0] * 12,
+            "post_reset_hold_active": False,
+            "post_reset_hold_remaining_s": 0.0,
+        }
 
 
 def _make_snapshot(joint_torque_nm: np.ndarray, *, time_s: float) -> dict[str, object]:
@@ -73,6 +95,14 @@ def _make_snapshot_full(
 
 
 class JointTorqueObservationTests(unittest.TestCase):
+    def assertDictFloatAllClose(self, actual: dict[str, float] | None, expected: dict[str, float]) -> None:
+        self.assertIsNotNone(actual)
+        if actual is None:
+            return
+        self.assertEqual(set(actual.keys()), set(expected.keys()))
+        for key, value in expected.items():
+            self.assertAlmostEqual(float(actual[key]), float(value), places=5)
+
     def test_ankle_velocity_and_torque_roundtrip_respects_motor_sign(self) -> None:
         robot = BipedalRobotController(bus_can0=object(), bus_can1=object())
         qd_joint = np.zeros(12, dtype=float)
@@ -211,6 +241,46 @@ class JointTorqueObservationTests(unittest.TestCase):
         np.testing.assert_allclose(obs_zeroed, np.zeros_like(raw_action), atol=1e-6)
         np.testing.assert_allclose(agent._last_policy_action, raw_action, atol=1e-6)
 
+    def test_isolated_rl_agent_apply_action_maps_policy_right_then_left_to_robot_sides(self) -> None:
+        robot = _CaptureRobot()
+        agent = IsolatedRLAgent(
+            robot=robot,
+            spec=IsolatedAgentSpec(
+                action_keys=list(ISOLATED_POLICY_ACTION_KEYS),
+                action_scale=1.0,
+                action_scales_rad=[1.0] * 12,
+                encoder_bias_rad=[0.0] * 12,
+            ),
+            policy=_DummyPolicy(),
+        )
+        agent._default_joint_pos_rad = np.zeros(12, dtype=np.float32)
+
+        action_rad = np.deg2rad(np.arange(1, 13, dtype=np.float32))
+        agent._apply_action(action_rad)
+
+        self.assertDictFloatAllClose(
+            robot.last_right,
+            {
+                "hipz": 1.0,
+                "hipx": 2.0,
+                "hipy": 3.0,
+                "knee": 4.0,
+                "ankle_pitch": 5.0,
+                "ankle_roll": 6.0,
+            },
+        )
+        self.assertDictFloatAllClose(
+            robot.last_left,
+            {
+                "hipz": 7.0,
+                "hipx": 8.0,
+                "hipy": 9.0,
+                "knee": 10.0,
+                "ankle_pitch": 11.0,
+                "ankle_roll": 12.0,
+            },
+        )
+
     def test_main_rl_agent_uses_delayed_joint_torque(self) -> None:
         agent = MainRLAgent(
             robot=_DummyRobot(),
@@ -273,6 +343,62 @@ class JointTorqueObservationTests(unittest.TestCase):
         np.testing.assert_allclose(obs_second[:12], expected_pos, atol=1e-6)
         np.testing.assert_allclose(obs_second[12:24], expected_vel, atol=1e-6)
         np.testing.assert_allclose(obs_second[24:36], expected_tau, atol=1e-6)
+
+    def test_main_rl_agent_apply_action_maps_block_policy_order_to_robot_sides(self) -> None:
+        robot = _CaptureRobot()
+        agent = MainRLAgent(
+            robot=robot,
+            spec=MainAgentSpec(
+                action_keys=list(POLICY_BLOCK_ACTION_KEYS_12),
+                action_scale=1.0,
+                action_scales_rad=[1.0] * 12,
+                use_policy_joint_order=True,
+            ),
+            policy=_DummyPolicy(),
+        )
+        agent._default_joint_pos_rad = np.zeros(12, dtype=np.float32)
+
+        action_rad = np.deg2rad(np.arange(1, 13, dtype=np.float32))
+        agent._apply_action(action_rad)
+
+        self.assertDictFloatAllClose(
+            robot.last_right,
+            {
+                "hipz": 1.0,
+                "hipx": 2.0,
+                "hipy": 3.0,
+                "knee": 4.0,
+                "ankle_pitch": 5.0,
+                "ankle_roll": 6.0,
+            },
+        )
+        self.assertDictFloatAllClose(
+            robot.last_left,
+            {
+                "hipz": 7.0,
+                "hipx": 8.0,
+                "hipy": 9.0,
+                "knee": 10.0,
+                "ankle_pitch": 11.0,
+                "ankle_roll": 12.0,
+            },
+        )
+
+    def test_main_infer_agent_spec_canonicalizes_torque_obs_yaml_order(self) -> None:
+        cfg = load_main_config(Path("RL_policy/less_noice_high_gain_torque_obs/config.yaml"))
+        spec = infer_main_agent_spec(cfg)
+        self.assertEqual(
+            spec.policy_terms,
+            ["base_ang_vel", "projected_gravity", "joint_pos", "joint_vel", "actions", "command", "joint_torques"],
+        )
+
+    def test_isolated_infer_agent_spec_canonicalizes_torque_obs_yaml_order(self) -> None:
+        cfg = load_main_config(Path("RL_policy/less_noice_high_gain_torque_obs/config.yaml"))
+        spec = infer_isolated_agent_spec(cfg)
+        self.assertEqual(
+            spec.policy_terms,
+            ["base_ang_vel", "projected_gravity", "joint_pos", "joint_vel", "actions", "command", "joint_torques"],
+        )
 
     def test_extract_onnx_joint_action_keys_detects_block_policy_order(self) -> None:
         policy_path = Path("RL_policy/less_noice_high_gain_torque_obs/policy.onnx")

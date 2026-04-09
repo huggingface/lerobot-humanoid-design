@@ -145,13 +145,21 @@ def _extract_policy_terms(cfg: Dict[str, Any]) -> List[str]:
 def _canonicalize_policy_terms(policy_terms: List[str]) -> List[str]:
     terms = [str(t) for t in policy_terms]
     terms_set = set(terms)
-    canonical_sets = (
-        ["base_lin_vel", "base_ang_vel", "projected_gravity", "joint_pos", "joint_vel", "actions", "command"],
-        ["base_ang_vel", "projected_gravity", "joint_pos", "joint_vel", "actions", "command"],
-    )
-    for canonical in canonical_sets:
-        if terms_set == set(canonical):
-            return [t for t in canonical if t in terms_set]
+    core_terms = ("base_ang_vel", "projected_gravity", "joint_pos", "joint_vel", "actions", "command")
+    supported_terms = set(core_terms) | {"base_lin_vel"} | set(JOINT_TORQUE_TERM_NAMES)
+    torque_term = next((term for term in terms if term in JOINT_TORQUE_TERM_NAMES), None)
+    if (
+        set(core_terms).issubset(terms_set)
+        and len([term for term in terms_set if term in JOINT_TORQUE_TERM_NAMES]) <= 1
+        and not (terms_set - supported_terms)
+    ):
+        canonical: List[str] = []
+        if "base_lin_vel" in terms_set:
+            canonical.append("base_lin_vel")
+        canonical.extend(core_terms)
+        if torque_term is not None:
+            canonical.append(torque_term)
+        return canonical
     return terms
 
 

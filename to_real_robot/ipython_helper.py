@@ -502,7 +502,7 @@ agent = RLAgent.from_files(
     robot,
     config_path="RL_policy/less_noice_high_gain_torque_obs/config.yaml",
     policy_path="RL_policy/less_noice_high_gain_torque_obs/policy.onnx", #2026-03-04_17-28-46.onnx",
-    log_path="RL_policy/less_noice_high_gain_torque_obs/debug_ctrl4.csv",
+    log_path="RL_policy/less_noice_high_gain_torque_obs/debug_ctrl5.csv",
     log_observation=True,
     log_action=True,
     log_every_n=1,

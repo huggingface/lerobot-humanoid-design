@@ -85,6 +85,8 @@ ACTION_SCALE_SIGN_OVERRIDES_BY_KEY = {
     "right.hipx": -1.0,
 }
 
+JOINT_TORQUE_TERM_NAMES = ("joint_torque", "joint_torques", "joint_effort", "joint_efforts")
+
 @dataclass
 class AgentSpec:
     action_keys: List[str]
@@ -189,19 +191,27 @@ def _canonicalize_policy_terms(policy_terms: List[str]) -> List[str]:
     """Normalize known MJLab velocity observation term layouts.
 
     Some exported YAML configs reorder dict keys compared to the runtime
-    insertion order used when the policy was trained. For known term sets,
-    force the canonical runtime order to match training.
+    insertion order used when the policy was trained. For known velocity-task
+    term families, force the canonical runtime order to match training,
+    including the optional torque observation block.
     """
     terms = [str(t) for t in policy_terms]
     terms_set = set(terms)
-
-    canonical_sets = (
-        ["base_lin_vel", "base_ang_vel", "projected_gravity", "joint_pos", "joint_vel", "actions", "command"],
-        ["base_ang_vel", "projected_gravity", "joint_pos", "joint_vel", "actions", "command"],
-    )
-    for canonical in canonical_sets:
-        if terms_set == set(canonical):
-            return [t for t in canonical if t in terms_set]
+    core_terms = ("base_ang_vel", "projected_gravity", "joint_pos", "joint_vel", "actions", "command")
+    supported_terms = set(core_terms) | {"base_lin_vel"} | set(JOINT_TORQUE_TERM_NAMES)
+    torque_term = next((term for term in terms if term in JOINT_TORQUE_TERM_NAMES), None)
+    if (
+        set(core_terms).issubset(terms_set)
+        and len([term for term in terms_set if term in JOINT_TORQUE_TERM_NAMES]) <= 1
+        and not (terms_set - supported_terms)
+    ):
+        canonical: List[str] = []
+        if "base_lin_vel" in terms_set:
+            canonical.append("base_lin_vel")
+        canonical.extend(core_terms)
+        if torque_term is not None:
+            canonical.append(torque_term)
+        return canonical
     return terms
 
 
@@ -457,9 +467,6 @@ def infer_agent_spec(cfg: Dict[str, Any]) -> AgentSpec:
         joint_vel_source=joint_vel_source,
         use_policy_joint_order=_uses_block_policy_joint_order(action_keys),
     )
-
-
-JOINT_TORQUE_TERM_NAMES = ("joint_torque", "joint_torques", "joint_effort", "joint_efforts")
 
 
 class PolicyWrapper:
