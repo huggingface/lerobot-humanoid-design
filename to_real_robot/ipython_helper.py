@@ -429,7 +429,8 @@ from mock_bus import MockBus
 
 from RL_agent_isolated import RLAgent
 from gamepad_controller import GamepadController
-imu = IMU(sensor="bno055", i2c_bus=1, address=0x28, rate_hz=100.0, frame_yaw_deg=180.0)
+imu = IMU(sensor="bno055", i2c_bus=1, address=0x28, rate_hz=100.0, frame_yaw_deg=-180.0)
+
 
 # imu = IMU(sensor="jy901", mock=False, port="/dev/ttyAMA0", baudrate=9600)
 # robot = BipedalRobotController(control_hz=100.0, bus_can0=MockBus(), bus_can1=MockBus(),imu=imu)

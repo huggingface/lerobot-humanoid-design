@@ -32,6 +32,9 @@ except Exception:  # pragma: no cover - optional runtime dependency
 
 DEFAULT_MJCF_PATH = Path("bipedal_plateform_no_arms/mjcf/sim_scene_safe.xml")
 
+# Match the real controller: keep the MIT feedforward torque field pinned at 0 Nm.
+ENABLE_MIT_FEEDFORWARD_TORQUE = False
+
 # Mirrors gains and init pose from:
 # bipedal_plateform_no_arms/mjcf/lerobot_humanoid_no_arms_constants.py
 LEROBOT_SIM_GAINS_BY_MOTOR_ID: Dict[int, tuple[float, float]] = {
@@ -320,10 +323,11 @@ class SimBipedalRobotController:
             raw = {mid: float(self.action[mid].position_deg) for mid in MOTOR_IDS}
             q_cmd_deg = self.motor_state_to_joint_state(raw, output_radians=False, nq=12)
             qd_cmd_deg_s = np.full(12, float(velocity_deg_s), dtype=float)
-            tau_cmd_nm = np.full(12, float(torque_nm), dtype=float)
+            tau_cmd_nm = np.zeros(12, dtype=float)
             self._apply_joint_side_updates(q_cmd_deg, left=left, right=right)
             self._apply_joint_side_updates(qd_cmd_deg_s, left=left_velocity_deg_s, right=right_velocity_deg_s)
-            self._apply_joint_side_updates(tau_cmd_nm, left=left_torque_nm, right=right_torque_nm)
+            if ENABLE_MIT_FEEDFORWARD_TORQUE:
+                self._apply_joint_side_updates(tau_cmd_nm, left=left_torque_nm, right=right_torque_nm)
             pos_raw = self.joint_state_to_motor_state(q_cmd_deg, input_radians=False, output_space="raw")
             vel_raw, tau_raw = self._joint_vel_tau_to_motor_raw(qd_cmd_deg_s, tau_cmd_nm)
 

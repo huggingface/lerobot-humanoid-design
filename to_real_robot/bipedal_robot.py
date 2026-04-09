@@ -51,6 +51,9 @@ except Exception:  # pragma: no cover - optional runtime dependencies
 
 logger = logging.getLogger(__name__)
 
+# Temporary safety switch: keep the MIT feedforward torque field pinned at 0 Nm.
+ENABLE_MIT_FEEDFORWARD_TORQUE = False
+
 
 @dataclass
 class JointGains:
@@ -265,12 +268,13 @@ class BipedalRobotController:
             cur_cmd_raw = {mid: float(proposed[mid].position_deg) for mid in MOTOR_IDS}
             q_cmd_deg = self.motor_state_to_joint_state(cur_cmd_raw, output_radians=False, nq=12)
             qd_cmd_deg_s = np.full(12, float(velocity_deg_s), dtype=float)
-            tau_cmd_nm = np.full(12, float(torque_nm), dtype=float)
+            tau_cmd_nm = np.zeros(12, dtype=float)
 
             # Apply partial updates in model joint space.
             self._apply_joint_side_updates(q_cmd_deg, left=left, right=right)
             self._apply_joint_side_updates(qd_cmd_deg_s, left=left_velocity_deg_s, right=right_velocity_deg_s)
-            self._apply_joint_side_updates(tau_cmd_nm, left=left_torque_nm, right=right_torque_nm)
+            if ENABLE_MIT_FEEDFORWARD_TORQUE:
+                self._apply_joint_side_updates(tau_cmd_nm, left=left_torque_nm, right=right_torque_nm)
 
             # Convert desired joint state back to per-motor raw commands.
             target_raw = self.joint_state_to_motor_state(q_cmd_deg, input_radians=False, output_space="raw")
