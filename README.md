@@ -1,85 +1,28 @@
-# LeRobot Humanoid Design
+# LeRobot Humanoid — Minimal
 
-This repository gathers the design work for the next humanoid robot developed within the LeRobot team.
+Minimal branch focused on the bipedal platform: sim-to-real RL policy deployment.
 
-It centralizes early-stage engineering and research efforts related to robot modeling, mechanical co-design, and validation through optimization and optimal control.
+The co-design studies, OCP experiments, retired URDF variants, and calibration/debug tooling have been removed here. See `main` for the full design repo.
 
-The current focus includes:
+## What's in here
 
-a bipedal platform (lower body) already modeled and prototyped,
+- `to_real_robot/` — controller, sim + real hardware interface
+  - `sim_robot.py` — Mujoco simulation wrapper
+  - `bipedal_robot.py` — real-robot controller (CAN + Robstride motors)
+  - `bipdeal_config.py` — motor calibration / config
+  - `robstride_toolkit.py` — motor protocol
+  - `RL_agent_isolated.py` — policy runner (ONNX)
+  - `gamepad_controller.py` — teleop
+  - `IMU_JY901.py` — IMU driver
+  - `root_constant.py` — motor / path constants
+  - `leg_test/mit.py` — MIT-mode CAN motor encoding (shared dep)
+  - `bipedal_plateform_no_arms/` — MJCF + URDF + meshes
+  - `RL_policy/` — trained ONNX policies
 
-and ongoing co-design of the upper body.
----
+## Requirements
 
-## Goals
+See `environement.lock` for the Python environment.
 
-The goal of this repository is to centralize all design-related artifacts for the new humanoid robot, including:
+## Known issues
 
-Robot models (URDF)
-
-Mechanical co-design algorithms and experiments
-
-Verification and validation through optimal control
-
-Design reports and internal technical notes
-
-Methodology documentation for future extensions
-
-This repository is intended to evolve alongside the robot design.
-
-## Current Status
-
-✅ URDF of the bipedal platform (lower body) added
-
-✅ Experimentation on 1 leg
-
-🚧 Upper body co-design in progress
-
-🗓️ Currently at Week 7 of the design roadmap
-
-
-## CAD reference (Onshape)
-
-The main CAD model is available on Onshape:
-👉
-
-This model is expected to evolve alongside the URDF and co-design studies.
----
-## Roadmap (high level)
-
-The humanoid design follows an iterative, co-design-driven roadmap:
-
-Weeks 1–2
-Baseline humanoid modeling (URDF v0), first hip co-design experiments, and actuator/middleware validation.
-
-Weeks 2–5
-Development of a first full CAD model and actuation assumptions.
-
-Weeks 6–9 (current phase)
-Assembly and validation of a first robotic leg prototype, and integration of the bipedal platform into the design workflow.
-
-Medium term
-Integration into a first full humanoid prototype (v0), including upper body design.
-
-Long term
-Iterative redesign, further design optimization, and public releases.
-
-
----
-
-## Installation
-
-
-Requirements
-
-The required Python environment is described in environment.lock.
-
-In addition, the following dependencies are required:
-
-A fork of Crocoddyl: https://github.com/LudovicDeMatteis/crocoddyl/tree/topic/contact-6D-closed-loop
-
-A fork of Sobec : wip
-
-meshcat (for visualization)
-
-
+- `to_real_robot/bipdeal_config.py` has log output pasted into the source (lines ~406+) that prevents `import`. Pre-existing on `main`; the file is used as a script, not imported.
