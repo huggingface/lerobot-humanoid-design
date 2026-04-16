@@ -164,6 +164,46 @@ class JY901IMU:
         ts = time.time()
         return ImuObservation(quat=quat, ang_vel_rad_s=ang, lin_acc_m_s2=acc, lin_vel_m_s=vel, timestamp=ts)
 
+    def read_dict(self) -> dict:
+        """bipedal_robot-compatible IMU snapshot.
+
+        JY901 native quaternion order is (w, x, y, z); downstream consumers
+        (controller / agent) read `quaternion_xyzw`, so we reorder here.
+        """
+        obs = self.get_observation()
+
+        quaternion_xyzw = None
+        if obs.quat is not None:
+            q = obs.quat
+            quaternion_xyzw = [float(q.x), float(q.y), float(q.z), float(q.w)]
+
+        gyro_rads = None
+        if obs.ang_vel_rad_s is not None:
+            a = obs.ang_vel_rad_s
+            gyro_rads = [float(a.x), float(a.y), float(a.z)]
+
+        linear_acceleration_mps2 = None
+        if obs.lin_acc_m_s2 is not None:
+            la = obs.lin_acc_m_s2
+            linear_acceleration_mps2 = [float(la.x), float(la.y), float(la.z)]
+
+        linear_velocity_mps = None
+        if obs.lin_vel_m_s is not None:
+            lv = obs.lin_vel_m_s
+            linear_velocity_mps = [float(lv.x), float(lv.y), float(lv.z)]
+
+        return {
+            "timestamp_s": float(obs.timestamp),
+            "quaternion_xyzw": quaternion_xyzw,
+            "gyro_rads": gyro_rads,
+            "ang_vel_rad_s": gyro_rads,
+            "linear_velocity_mps": linear_velocity_mps,
+            "lin_vel_m_s": linear_velocity_mps,
+            "linear_acceleration_mps2": linear_acceleration_mps2,
+            "available": True,
+            "sensor": "jy901",
+        }
+
     def reset_velocity(self) -> None:
         """Reset integrated linear velocity (useful at episode reset / known standstill)."""
         with self._lock:
