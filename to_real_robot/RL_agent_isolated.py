@@ -6,6 +6,7 @@ import json
 import pickle
 import threading
 import time
+import warnings
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,6 +43,9 @@ POLICY_ACTION_KEYS = [
 # Snapshot joint_state_* order from robot API:
 # [left(6), right(6)] -> policy order [right(6), left(6)].
 SNAPSHOT_TO_POLICY_JOINT_IDX = np.array([6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5], dtype=np.int64)
+# Snapshot joint_state_* order from robot API:
+# [left(6), right(6)] -> interleaved order [L0, R0, L1, R1, ...].
+SNAPSHOT_TO_INTERLEAVED_JOINT_IDX = np.array([0, 6, 1, 7, 2, 8, 3, 9, 4, 10, 5, 11], dtype=np.int64)
 JOINT_TORQUE_TERM_NAMES = ("joint_torque", "joint_torques", "joint_effort", "joint_efforts")
 
 
@@ -145,18 +149,30 @@ def _extract_policy_terms(cfg: Dict[str, Any]) -> List[str]:
 def _canonicalize_policy_terms(policy_terms: List[str]) -> List[str]:
     terms = [str(t) for t in policy_terms]
     terms_set = set(terms)
-    core_terms = ("base_ang_vel", "projected_gravity", "joint_pos", "joint_vel", "actions", "command")
-    supported_terms = set(core_terms) | {"base_lin_vel"} | set(JOINT_TORQUE_TERM_NAMES)
+    motion_core_terms = ("projected_gravity", "joint_pos", "joint_vel", "actions", "command")
+    supported_terms = set(motion_core_terms) | {"base_lin_vel", "base_ang_vel"} | set(JOINT_TORQUE_TERM_NAMES)
+
+    unsupported = [term for term in terms if term not in supported_terms]
+    if unsupported:
+        unsupported_unique = list(dict.fromkeys(unsupported))
+        warnings.warn(
+            f"Unsupported policy terms detected: {', '.join(unsupported_unique)}",
+            UserWarning,
+            stacklevel=2,
+        )
+
     torque_term = next((term for term in terms if term in JOINT_TORQUE_TERM_NAMES), None)
     if (
-        set(core_terms).issubset(terms_set)
+        set(motion_core_terms).issubset(terms_set)
         and len([term for term in terms_set if term in JOINT_TORQUE_TERM_NAMES]) <= 1
         and not (terms_set - supported_terms)
     ):
         canonical: List[str] = []
         if "base_lin_vel" in terms_set:
             canonical.append("base_lin_vel")
-        canonical.extend(core_terms)
+        if "base_ang_vel" in terms_set:
+            canonical.append("base_ang_vel")
+        canonical.extend(motion_core_terms)
         if torque_term is not None:
             canonical.append(torque_term)
         return canonical
@@ -792,7 +808,11 @@ class RLAgent:
             self._curr_obs_joint_vel = qd_now.copy()
             return qd_now
         if term_name in JOINT_TORQUE_TERM_NAMES:
-            tau_now = self._policy_order_joint_state(snapshot, "joint_torque_nm").astype(np.float32, copy=False)
+            tau_now = np.asarray(snapshot.get("joint_torque_nm", [0.0] * 12), dtype=np.float32).reshape(-1)
+            if tau_now.size < 12:
+                tau_now = np.pad(tau_now, (0, 12 - tau_now.size))
+            tau_now = tau_now[:12]
+            tau_now = tau_now[SNAPSHOT_TO_INTERLEAVED_JOINT_IDX]
             tau_now = self._apply_obs_term_scale(term_name, tau_now)
             self._curr_obs_joint_torque = tau_now.copy()
             return tau_now

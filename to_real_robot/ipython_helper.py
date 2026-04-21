@@ -338,26 +338,6 @@ robot.start(mode="control", auto_enable=True)
 robot.start_viewer()
 
 
-robot.set_action(
-left={
-    "hipz": 0.0,
-    "hipx": 0.0,
-    "hipy": -20.0535,
-    "knee": 40.1070,
-    "ankle_pitch": -20.0535,  # from ankley_left
-    "ankle_roll": 0.0,        # from anklex_left
-},
-right={
-    "hipz": 0.0,
-    "hipx": 0.0,
-    "hipy": 20.0535,
-    "knee": 40.1070,
-    "ankle_pitch": 20.0535,   # from ankley_right
-    "ankle_roll": 0.0,        # from anklex_right
-},
-)
-
-
 ### Isolated RL agent (same usage style) + gamepad command source
 
 from RL_agent_isolated import RLAgent
@@ -492,9 +472,9 @@ pad.start()
 
 agent = RLAgent.from_files(
     robot,
-    config_path="RL_policy/less_noice_high_gain_torque_obs_new_model/config.yaml",
-    policy_path="RL_policy/less_noice_high_gain_torque_obs_new_model/policy.onnx", #2026-03-04_17-28-46.onnx",
-    log_path="RL_policy/less_noice_high_gain_torque_obs_new_model/debug_ctrl5.csv",
+    config_path="RL_policy/new_training_pipe/config.yaml",
+    policy_path="RL_policy/new_training_pipe/policy.onnx", #2026-03-04_17-28-46.onnx",
+    log_path="RL_policy/new_training_pipe/debug_ctrl5.csv",
     log_observation=True,
     log_action=True,
     log_every_n=1,
@@ -503,8 +483,7 @@ agent = RLAgent.from_files(
 agent.spec.joint_vel_source = "auto"  # or "robot_state_estimation"
 
 # manual global scaling remains available
-agent.spec.action_scale = 0.0
-
-# pad provides (lin_x, lin_y, yaw_rate) commands
+agent.spec.action_scale = 0.3
 agent.set_command_source(pad)
+# pad provides (lin_x, lin_y, yaw_rate) commands
 agent.start()
