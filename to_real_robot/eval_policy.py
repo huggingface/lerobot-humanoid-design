@@ -685,6 +685,13 @@ def main() -> int:
     ap.add_argument("--policy-root", default=str(DEFAULT_POLICY_ROOT))
     ap.add_argument("--policies", nargs="*", default=None,
                     help="Subdirectories under --policy-root. Default: all with policy.onnx + config.yaml.")
+    ap.add_argument("--hf-repo", default=None,
+                    help="HuggingFace repo id (e.g. CarolinePascal/lerobot-humanoid-noarms-velocity-v16). "
+                         "Downloads the snapshot, finds policy.onnx + env.yaml (or config.yaml), and uses it "
+                         "as the policy root. Overrides --policy-root/--policies.")
+    ap.add_argument("--hf-subdir", default=None,
+                    help="Subdirectory inside the HF repo that contains policy.onnx + env.yaml. "
+                         "Auto-detected if there is exactly one such subdir.")
     ap.add_argument("--cmd-vx", nargs="*", type=float, default=[0.0, 0.3, 0.6])
     ap.add_argument("--duration", type=float, default=10.0)
     ap.add_argument("--warmup", type=float, default=1.0)
@@ -736,12 +743,44 @@ def main() -> int:
     ap.add_argument("--json-out", default=None)
     args = ap.parse_args()
 
-    policy_root = Path(args.policy_root).resolve()
-    if not policy_root.is_dir():
-        print(f"[eval][ERR] policy root not found: {policy_root}")
-        return 2
+    if args.hf_repo:
+        from huggingface_hub import snapshot_download
+        snap = Path(snapshot_download(args.hf_repo))
+        # Locate a subdir (or the root) that has both policy.onnx and either
+        # env.yaml or config.yaml. env.yaml is the Isaac Lab / AGILE convention;
+        # config.yaml is the older mjlab/wandb convention. Symlink env.yaml →
+        # config.yaml so the downstream loader finds it.
+        def _looks_like_policy_dir(d: Path) -> bool:
+            return (d / "policy.onnx").is_file() and (
+                (d / "config.yaml").is_file() or (d / "env.yaml").is_file()
+            )
+        if args.hf_subdir:
+            policy_dir = snap / args.hf_subdir
+        elif _looks_like_policy_dir(snap):
+            policy_dir = snap
+        else:
+            candidates = [d for d in snap.iterdir() if d.is_dir() and _looks_like_policy_dir(d)]
+            if len(candidates) != 1:
+                print(f"[eval][ERR] expected exactly one policy subdir in {snap}, got {[d.name for d in candidates]}")
+                return 2
+            policy_dir = candidates[0]
+        # If only env.yaml exists, alias it as config.yaml.
+        if not (policy_dir / "config.yaml").is_file() and (policy_dir / "env.yaml").is_file():
+            try:
+                (policy_dir / "config.yaml").symlink_to(policy_dir / "env.yaml")
+            except OSError:
+                import shutil as _sh
+                _sh.copyfile(policy_dir / "env.yaml", policy_dir / "config.yaml")
+        policy_root = policy_dir.parent
+        policies = [policy_dir.name]
+        print(f"[eval] hf_repo = {args.hf_repo}  resolved → {policy_dir}")
+    else:
+        policy_root = Path(args.policy_root).resolve()
+        if not policy_root.is_dir():
+            print(f"[eval][ERR] policy root not found: {policy_root}")
+            return 2
 
-    policies = args.policies if args.policies else _discover_policies(policy_root)
+        policies = args.policies if args.policies else _discover_policies(policy_root)
     if not policies:
         print(f"[eval][ERR] no policies found under {policy_root}")
         return 2
