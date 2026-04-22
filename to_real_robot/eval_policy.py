@@ -99,6 +99,11 @@ def _adapt_agile_env_to_mjlab_config(env_yaml_path: Path, config_yaml_path: Path
     if isinstance(policy_group, dict) and "history_length" in policy_group:
         env.setdefault("history_len", policy_group["history_length"])
 
+    # Mark the config so RL_agent_isolated uses the Isaac Lab observation layout:
+    # terms stay in training insertion order (no canonical reordering) and the
+    # history vector is term-major instead of time-major.
+    env["_obs_layout"] = "isaaclab"
+
     clean = _sanitize_for_safe_yaml(env)
     with open(config_yaml_path, "w") as f:
         yaml.safe_dump(clean, f, sort_keys=False)

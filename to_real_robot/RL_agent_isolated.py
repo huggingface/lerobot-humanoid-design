@@ -57,6 +57,15 @@ class AgentSpec:
     obs_term_scales: Dict[str, float] = field(default_factory=dict)
     joint_vel_source: str = "auto"  # auto | finite_diff
     debug_zero_actions_obs: bool = False
+    # "canonical" (mjlab): terms reordered to (base_ang_vel, projected_gravity,
+    # joint_pos, joint_vel, actions, command); history is time-major
+    # ([obs_{t-H+1}, ..., obs_t]).
+    # "isaaclab" (AGILE / Isaac Lab): terms stay in env.yaml insertion order;
+    # history is term-major ([term0_{t-H+1..t}, term1_{t-H+1..t}, ...]) to match
+    # Isaac Lab's flatten_history_dim=True + concatenate_terms=True export.
+    obs_layout: str = "canonical"
+    # Per-term dims in policy_terms order, populated lazily on first obs build.
+    term_dims: List[int] = field(default_factory=list)
 
 
 def _load_config(path: Path) -> Dict[str, Any]:
@@ -337,7 +346,16 @@ def _extract_default_joint_pos_rad_from_cfg(cfg: Dict[str, Any]) -> Optional[np.
 
 def infer_agent_spec(cfg: Dict[str, Any]) -> AgentSpec:
     action_keys = _extract_action_keys(cfg)
-    policy_terms = _canonicalize_policy_terms(_extract_policy_terms(cfg))
+    raw_terms = _extract_policy_terms(cfg)
+    obs_layout = str(cfg.get("_obs_layout", "canonical")).strip().lower() or "canonical"
+    if obs_layout == "isaaclab":
+        # Preserve training-time insertion order; the exported ONNX was built
+        # with flatten_history_dim=True + concatenate_terms=True, so the input
+        # vector order is determined by env.yaml term order, not by mjlab's
+        # canonical preference.
+        policy_terms = list(raw_terms)
+    else:
+        policy_terms = _canonicalize_policy_terms(raw_terms)
     history_len = int(
         _get_first(
             cfg,
@@ -384,6 +402,7 @@ def infer_agent_spec(cfg: Dict[str, Any]) -> AgentSpec:
         encoder_bias_rad=_extract_encoder_bias_rad(cfg, action_keys),
         obs_term_scales=_extract_observation_term_scales(cfg, policy_terms),
         joint_vel_source=joint_vel_source,
+        obs_layout=obs_layout,
     )
 
 
@@ -803,6 +822,8 @@ class RLAgent:
         self._curr_obs_joint_vel = None
         self._curr_obs_joint_torque = None
         parts = [self._term_observation_vector(snapshot, name) for name in self.spec.policy_terms]
+        if parts and not self.spec.term_dims:
+            self.spec.term_dims = [int(p.size) for p in parts]
         obs = np.concatenate(parts, axis=0).astype(np.float32, copy=False) if parts else np.zeros(0, dtype=np.float32)
 
         q_deg = self._policy_order_joint_state(snapshot, "joint_state_deg")
@@ -822,6 +843,25 @@ class RLAgent:
             first = self.obs_history[0]
             while len(self.obs_history) < self.spec.history_len:
                 self.obs_history.appendleft(first.copy())
+
+        if self.spec.obs_layout == "isaaclab" and self.spec.term_dims:
+            # Term-major: [term0_{t-H+1..t}, term1_{t-H+1..t}, ...]. This matches
+            # Isaac Lab's ObservationManager output when flatten_history_dim=True
+            # is applied at each term and concatenate_terms=True at the group
+            # (per observation_manager.py:reshape(..., -1) then torch.cat along
+            # the feature axis).
+            arr = np.stack(list(self.obs_history), axis=0)  # (H, D)
+            out_parts: List[np.ndarray] = []
+            off = 0
+            for d in self.spec.term_dims:
+                slab = arr[:, off : off + d]  # (H, d)
+                # Row-major reshape gives [t0_j0..t0_{d-1}, t1_j0..t1_{d-1}, ...]
+                # — time slowest, component fastest within term.
+                out_parts.append(slab.reshape(-1))
+                off += d
+            return np.concatenate(out_parts, axis=0).astype(np.float32, copy=False)
+
+        # mjlab / canonical: time-major [obs_{t-H+1}, ..., obs_t].
         return np.concatenate(list(self.obs_history), axis=0).astype(np.float32, copy=False)
 
     def _adapt_obs_dim_for_policy(self, obs: np.ndarray) -> np.ndarray:
