@@ -21,6 +21,89 @@ REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_POLICY_ROOT = REPO_ROOT / "RL_policy"
 
 
+# AGILE (Isaac Lab) observation term names → RL_agent_isolated canonical names.
+_AGILE_TERM_RENAME = {
+    "velocity_commands": "command",
+    "controlled_joint_pos": "joint_pos",
+    "controlled_joint_vel": "joint_vel",
+}
+# Keys on observations.policy that sit alongside the terms (i.e. not themselves terms).
+_POLICY_META_KEYS = {
+    "concatenate_terms",
+    "concatenate_dim",
+    "enable_corruption",
+    "history_length",
+    "flatten_history_dim",
+}
+
+
+def _sanitize_for_safe_yaml(value):
+    """Recursively convert an object tree (from yaml.unsafe_load) into primitives
+    that yaml.safe_dump accepts: tuples → lists, drops slice/type objects."""
+    if isinstance(value, dict):
+        return {str(k): _sanitize_for_safe_yaml(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_for_safe_yaml(v) for v in value]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float, str)) or value is None:
+        return value
+    # slice, type, function — unrepresentable; drop.
+    return None
+
+
+def _adapt_agile_env_to_mjlab_config(env_yaml_path: Path, config_yaml_path: Path) -> None:
+    """Translate an AGILE-exported env.yaml into the mjlab-convention config.yaml
+    that to_real_robot/RL_agent_isolated.py expects.
+
+    AGILE puts obs terms directly under observations.policy.<term_name> with names
+    like velocity_commands / controlled_joint_{pos,vel}, and keeps robot config at
+    scene.robot. RL_agent_isolated looks for observations.policy.terms.<term_name>
+    with canonical names (command, joint_pos, joint_vel) and scene.entities.robot.
+    """
+    import yaml  # type: ignore
+
+    with open(env_yaml_path) as f:
+        env = yaml.unsafe_load(f)
+    if not isinstance(env, dict):
+        raise ValueError(f"env.yaml did not parse into a dict: {env_yaml_path}")
+
+    obs = env.get("observations")
+    if isinstance(obs, dict):
+        for group_name in ("policy", "critic"):
+            group = obs.get(group_name)
+            if not isinstance(group, dict):
+                continue
+            terms: dict = {}
+            meta: dict = {}
+            for k, v in group.items():
+                if k in _POLICY_META_KEYS:
+                    meta[k] = v
+                else:
+                    terms[_AGILE_TERM_RENAME.get(k, k)] = v
+            rebuilt = dict(meta)
+            rebuilt["terms"] = terms
+            obs[group_name] = rebuilt
+
+    scene = env.get("scene")
+    if isinstance(scene, dict) and "robot" in scene and "entities" not in scene:
+        scene["entities"] = {"robot": scene.pop("robot")}
+
+    # RL_agent_isolated's history_len lookup only matches env_cfg.* paths or a
+    # top-level `history_len`; mirror the policy history_length to the top level.
+    policy_group = (
+        env.get("observations", {}).get("policy")
+        if isinstance(env.get("observations"), dict)
+        else None
+    )
+    if isinstance(policy_group, dict) and "history_length" in policy_group:
+        env.setdefault("history_len", policy_group["history_length"])
+
+    clean = _sanitize_for_safe_yaml(env)
+    with open(config_yaml_path, "w") as f:
+        yaml.safe_dump(clean, f, sort_keys=False)
+
+
 @dataclass
 class EvalConfig:
     policy_name: str
@@ -746,10 +829,6 @@ def main() -> int:
     if args.hf_repo:
         from huggingface_hub import snapshot_download
         snap = Path(snapshot_download(args.hf_repo))
-        # Locate a subdir (or the root) that has both policy.onnx and either
-        # env.yaml or config.yaml. env.yaml is the Isaac Lab / AGILE convention;
-        # config.yaml is the older mjlab/wandb convention. Symlink env.yaml →
-        # config.yaml so the downstream loader finds it.
         def _looks_like_policy_dir(d: Path) -> bool:
             return (d / "policy.onnx").is_file() and (
                 (d / "config.yaml").is_file() or (d / "env.yaml").is_file()
@@ -764,13 +843,13 @@ def main() -> int:
                 print(f"[eval][ERR] expected exactly one policy subdir in {snap}, got {[d.name for d in candidates]}")
                 return 2
             policy_dir = candidates[0]
-        # If only env.yaml exists, alias it as config.yaml.
+
+        # env.yaml (AGILE / Isaac Lab) and config.yaml (mjlab) use different schemas.
+        # RL_agent_isolated expects mjlab layout; translate when only env.yaml exists.
         if not (policy_dir / "config.yaml").is_file() and (policy_dir / "env.yaml").is_file():
-            try:
-                (policy_dir / "config.yaml").symlink_to(policy_dir / "env.yaml")
-            except OSError:
-                import shutil as _sh
-                _sh.copyfile(policy_dir / "env.yaml", policy_dir / "config.yaml")
+            _adapt_agile_env_to_mjlab_config(
+                policy_dir / "env.yaml", policy_dir / "config.yaml"
+            )
         policy_root = policy_dir.parent
         policies = [policy_dir.name]
         print(f"[eval] hf_repo = {args.hf_repo}  resolved → {policy_dir}")
