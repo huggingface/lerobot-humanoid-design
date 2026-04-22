@@ -104,6 +104,28 @@ def _adapt_agile_env_to_mjlab_config(env_yaml_path: Path, config_yaml_path: Path
         yaml.safe_dump(clean, f, sort_keys=False)
 
 
+def _read_init_base_quat_from_config(config_yaml_path: Path):
+    """Pull scene.entities.robot.init_state.rot (w, x, y, z) from a config.yaml.
+    Returns a 4-tuple, or None if the key is absent."""
+    try:
+        import yaml  # type: ignore
+        with open(config_yaml_path) as f:
+            cfg = yaml.safe_load(f)
+    except Exception:
+        return None
+    cur = cfg
+    for part in ("scene", "entities", "robot", "init_state", "rot"):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    if isinstance(cur, (list, tuple)) and len(cur) == 4:
+        try:
+            return tuple(float(v) for v in cur)
+        except Exception:
+            return None
+    return None
+
+
 @dataclass
 class EvalConfig:
     policy_name: str
@@ -135,6 +157,7 @@ class EvalConfig:
     tilt_bias_drift_deg_per_sqrt_s: float = 0.0  # orientation drift injected into projected_gravity
     tilt_bias_tau_s: float = 200.0
     obs_dropout_prob: float = 0.0  # probability of freezing obs for one step
+    init_base_quat_wxyz: Optional[tuple] = None  # override MuJoCo base-link quat at reset
 
 
 @dataclass
@@ -538,6 +561,7 @@ def run_episode(eval_cfg: EvalConfig, *, policy_dir: Path) -> EpisodeMetrics:
         control_hz=eval_cfg.control_hz,
         auto_reset_on_flip=False,
         auto_reset_on_divergence=False,
+        init_base_quat_wxyz=eval_cfg.init_base_quat_wxyz,
     )
     robot.start(mode="control", auto_enable=True)
     _apply_initial_perturbation(robot, eval_cfg)
@@ -823,6 +847,10 @@ def main() -> int:
                     help="Mean-reversion time constant for tilt bias (seconds).")
     ap.add_argument("--obs-dropout-prob", type=float, default=0.0,
                     help="Per-step probability of returning stale obs (simulates dropped serial frame).")
+    ap.add_argument("--init-base-quat", nargs=4, type=float, default=None,
+                    metavar=("W", "X", "Y", "Z"),
+                    help="Override MuJoCo base-link init quaternion (w x y z). If omitted, "
+                         "the value is read from config.yaml's scene.entities.robot.init_state.rot.")
     ap.add_argument("--json-out", default=None)
     args = ap.parse_args()
 
@@ -873,9 +901,20 @@ def main() -> int:
     n_seeds = max(1, int(args.seeds))
     seed_start = int(args.seed_start)
 
+    cli_init_quat = tuple(float(v) for v in args.init_base_quat) if args.init_base_quat else None
+
     results: List[EpisodeMetrics] = []
     for name in policies:
         pdir = policy_root / name
+        if cli_init_quat is not None:
+            policy_init_quat = cli_init_quat
+            print(f"[eval] {name}: init_base_quat_wxyz = {policy_init_quat}  (from CLI)")
+        else:
+            policy_init_quat = _read_init_base_quat_from_config(pdir / "config.yaml")
+            if policy_init_quat is not None:
+                print(f"[eval] {name}: init_base_quat_wxyz = {policy_init_quat}  (from config.yaml)")
+            else:
+                print(f"[eval] {name}: init_base_quat_wxyz = identity  (no override)")
         for vx in args.cmd_vx:
             for k in range(n_seeds):
                 seed = seed_start + k
@@ -906,6 +945,7 @@ def main() -> int:
                     tilt_bias_drift_deg_per_sqrt_s=float(args.tilt_bias_drift_deg_per_sqrt_s),
                     tilt_bias_tau_s=float(args.tilt_bias_tau_s),
                     obs_dropout_prob=float(args.obs_dropout_prob),
+                    init_base_quat_wxyz=policy_init_quat,
                 )
                 print(f"[eval] {name:<42} vx={vx:>5.2f} seed={seed} ...", flush=True)
                 try:

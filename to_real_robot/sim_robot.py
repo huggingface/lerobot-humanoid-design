@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Union
+from typing import Any, Dict, Iterable, Optional, Sequence, Union
 
 import threading
 import time
@@ -126,6 +126,7 @@ class SimBipedalRobotController:
         auto_reset_on_flip: bool = True,
         flip_reset_angle_rad: float = 1.2217304763960306,
         reset_hold_s: float = 0.,
+        init_base_quat_wxyz: Optional[Sequence[float]] = None,
     ):
         if mujoco is None:
             raise RuntimeError(
@@ -151,6 +152,23 @@ class SimBipedalRobotController:
         self._fixed_base_height_m = float(fixed_base_height_m)
         self._hardcode_mjlab_spawn = bool(hardcode_mjlab_spawn and self._has_free_base)
         self._hardcode_mjlab_spawn_with_qvel = bool(hardcode_mjlab_spawn_with_qvel)
+        # Optional override for the base-link orientation at reset (w, x, y, z).
+        # Isaac Lab-trained policies are often trained with a non-identity init
+        # quaternion (e.g. the 10° pitch counter-rotation from the AGILE
+        # lerobot-humanoid-no-arms config); setting this matches the gravity
+        # vector the policy saw at training-time reset.
+        if init_base_quat_wxyz is None:
+            self._init_base_quat_wxyz = None
+        else:
+            q = np.asarray(init_base_quat_wxyz, dtype=float).reshape(-1)
+            if q.size != 4:
+                raise ValueError(
+                    f"init_base_quat_wxyz must have 4 elements (w, x, y, z); got {q.size}"
+                )
+            norm = float(np.linalg.norm(q))
+            if norm < 1e-9:
+                raise ValueError("init_base_quat_wxyz has zero norm")
+            self._init_base_quat_wxyz = (q / norm).astype(float)
         self._auto_reset_on_divergence = bool(auto_reset_on_divergence)
         self._auto_reset_on_flip = bool(auto_reset_on_flip)
         self._flip_reset_angle_rad = float(flip_reset_angle_rad)
@@ -728,6 +746,8 @@ class SimBipedalRobotController:
                 self.data.qpos[4] = 0.0
                 self.data.qpos[5] = 0.0
                 self.data.qpos[6] = 0.0
+            if self._init_base_quat_wxyz is not None and not self._fixed_base:
+                self.data.qpos[3:7] = self._init_base_quat_wxyz
         if self._use_lerobot_reference:
             for jn, val in LEROBOT_KNEES_BENT_REF_POSE_RAD.items():
                 jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, jn)
