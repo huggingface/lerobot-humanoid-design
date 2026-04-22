@@ -15,98 +15,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from sim_robot import SimBipedalRobotController
 from RL_agent_isolated import RLAgent
+from hf_policy_adapter import adapt_agile_env_to_mjlab_config
 
 
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_POLICY_ROOT = REPO_ROOT / "RL_policy"
-
-
-# AGILE (Isaac Lab) observation term names → RL_agent_isolated canonical names.
-_AGILE_TERM_RENAME = {
-    "velocity_commands": "command",
-    "controlled_joint_pos": "joint_pos",
-    "controlled_joint_vel": "joint_vel",
-}
-# Keys on observations.policy that sit alongside the terms (i.e. not themselves terms).
-_POLICY_META_KEYS = {
-    "concatenate_terms",
-    "concatenate_dim",
-    "enable_corruption",
-    "history_length",
-    "flatten_history_dim",
-}
-
-
-def _sanitize_for_safe_yaml(value):
-    """Recursively convert an object tree (from yaml.unsafe_load) into primitives
-    that yaml.safe_dump accepts: tuples → lists, drops slice/type objects."""
-    if isinstance(value, dict):
-        return {str(k): _sanitize_for_safe_yaml(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_sanitize_for_safe_yaml(v) for v in value]
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float, str)) or value is None:
-        return value
-    # slice, type, function — unrepresentable; drop.
-    return None
-
-
-def _adapt_agile_env_to_mjlab_config(env_yaml_path: Path, config_yaml_path: Path) -> None:
-    """Translate an AGILE-exported env.yaml into the mjlab-convention config.yaml
-    that to_real_robot/RL_agent_isolated.py expects.
-
-    AGILE puts obs terms directly under observations.policy.<term_name> with names
-    like velocity_commands / controlled_joint_{pos,vel}, and keeps robot config at
-    scene.robot. RL_agent_isolated looks for observations.policy.terms.<term_name>
-    with canonical names (command, joint_pos, joint_vel) and scene.entities.robot.
-    """
-    import yaml  # type: ignore
-
-    with open(env_yaml_path) as f:
-        env = yaml.unsafe_load(f)
-    if not isinstance(env, dict):
-        raise ValueError(f"env.yaml did not parse into a dict: {env_yaml_path}")
-
-    obs = env.get("observations")
-    if isinstance(obs, dict):
-        for group_name in ("policy", "critic"):
-            group = obs.get(group_name)
-            if not isinstance(group, dict):
-                continue
-            terms: dict = {}
-            meta: dict = {}
-            for k, v in group.items():
-                if k in _POLICY_META_KEYS:
-                    meta[k] = v
-                else:
-                    terms[_AGILE_TERM_RENAME.get(k, k)] = v
-            rebuilt = dict(meta)
-            rebuilt["terms"] = terms
-            obs[group_name] = rebuilt
-
-    scene = env.get("scene")
-    if isinstance(scene, dict) and "robot" in scene and "entities" not in scene:
-        scene["entities"] = {"robot": scene.pop("robot")}
-
-    # RL_agent_isolated's history_len lookup only matches env_cfg.* paths or a
-    # top-level `history_len`; mirror the policy history_length to the top level.
-    policy_group = (
-        env.get("observations", {}).get("policy")
-        if isinstance(env.get("observations"), dict)
-        else None
-    )
-    if isinstance(policy_group, dict) and "history_length" in policy_group:
-        env.setdefault("history_len", policy_group["history_length"])
-
-    # Mark the config so RL_agent_isolated uses the Isaac Lab observation layout:
-    # terms stay in training insertion order (no canonical reordering) and the
-    # history vector is term-major instead of time-major.
-    env["_obs_layout"] = "isaaclab"
-
-    clean = _sanitize_for_safe_yaml(env)
-    with open(config_yaml_path, "w") as f:
-        yaml.safe_dump(clean, f, sort_keys=False)
 
 
 def _read_init_base_quat_from_config(config_yaml_path: Path):
@@ -556,7 +469,14 @@ def _apply_initial_perturbation(robot: SimBipedalRobotController, cfg: EvalConfi
         robot._sync_state_from_sim(time.time())
 
 
-def run_episode(eval_cfg: EvalConfig, *, policy_dir: Path) -> EpisodeMetrics:
+def run_episode(
+    eval_cfg: EvalConfig,
+    *,
+    policy_dir: Path,
+    video_path: Optional[Path] = None,
+    video_width: int = 640,
+    video_height: int = 480,
+) -> EpisodeMetrics:
     config_path = policy_dir / "config.yaml"
     policy_path = policy_dir / "policy.onnx"
     if not config_path.is_file() or not policy_path.is_file():
@@ -570,6 +490,19 @@ def run_episode(eval_cfg: EvalConfig, *, policy_dir: Path) -> EpisodeMetrics:
     )
     robot.start(mode="control", auto_enable=True)
     _apply_initial_perturbation(robot, eval_cfg)
+
+    renderer = None
+    render_cam = None
+    frames: List[np.ndarray] = []
+    if video_path is not None:
+        import mujoco as _mj
+
+        renderer = _mj.Renderer(robot.model, height=video_height, width=video_width)
+        render_cam = _mj.MjvCamera()
+        _mj.mjv_defaultFreeCamera(robot.model, render_cam)
+        render_cam.distance = 2.5
+        render_cam.elevation = -15.0
+        render_cam.azimuth = 135.0
 
     any_obs_noise = (
         eval_cfg.obs_joint_pos_noise_deg > 0.0
@@ -653,6 +586,12 @@ def run_episode(eval_cfg: EvalConfig, *, policy_dir: Path) -> EpisodeMetrics:
                 base_pos = np.asarray(robot.data.qpos[0:3], dtype=float).copy()
                 base_q_wxyz = np.asarray(robot.data.qpos[3:7], dtype=float).copy()
                 base_vel_world = np.asarray(robot.data.qvel[0:3], dtype=float).copy()
+                if renderer is not None:
+                    render_cam.lookat[0] = float(base_pos[0])
+                    render_cam.lookat[1] = float(base_pos[1])
+                    render_cam.lookat[2] = float(base_pos[2])
+                    renderer.update_scene(robot.data, camera=render_cam)
+                    frames.append(renderer.render())
             qw, qx, qy, qz = (float(v) for v in base_q_wxyz)
             roll, pitch, yaw = _quat_wxyz_to_rpy(qw, qx, qy, qz)
             base_z = float(base_pos[2])
@@ -698,6 +637,18 @@ def run_episode(eval_cfg: EvalConfig, *, policy_dir: Path) -> EpisodeMetrics:
                 agent.stop()
             finally:
                 robot.stop()
+        if renderer is not None and video_path is not None and frames:
+            import imageio.v2 as imageio
+
+            video_path.parent.mkdir(parents=True, exist_ok=True)
+            imageio.mimwrite(
+                str(video_path),
+                frames,
+                fps=int(max(1.0, eval_cfg.sample_hz)),
+                codec="libx264",
+                quality=7,
+            )
+            print(f"[eval] video written to {video_path}  ({len(frames)} frames)")
 
     if x0 is None or y0 is None:
         dx = dy = 0.0
@@ -805,6 +756,7 @@ def main() -> int:
                     help="Subdirectory inside the HF repo that contains policy.onnx + env.yaml. "
                          "Auto-detected if there is exactly one such subdir.")
     ap.add_argument("--cmd-vx", nargs="*", type=float, default=[0.0, 0.3, 0.6])
+    ap.add_argument("--cmd-vy", nargs="*", type=float, default=[0.0])
     ap.add_argument("--duration", type=float, default=10.0)
     ap.add_argument("--warmup", type=float, default=1.0)
     ap.add_argument("--fall-height", type=float, default=0.35)
@@ -857,6 +809,11 @@ def main() -> int:
                     help="Override MuJoCo base-link init quaternion (w x y z). If omitted, "
                          "the value is read from config.yaml's scene.entities.robot.init_state.rot.")
     ap.add_argument("--json-out", default=None)
+    ap.add_argument("--video", default=None,
+                    help="Write an mp4 of the rollout to this path (headless offscreen render, no mjpython needed). "
+                         "With multiple (policy, vx, seed) runs, the seed/vx are appended to the filename.")
+    ap.add_argument("--video-width", type=int, default=640)
+    ap.add_argument("--video-height", type=int, default=480)
     args = ap.parse_args()
 
     if args.hf_repo:
@@ -880,7 +837,7 @@ def main() -> int:
         # env.yaml (AGILE / Isaac Lab) and config.yaml (mjlab) use different schemas.
         # RL_agent_isolated expects mjlab layout; translate when only env.yaml exists.
         if not (policy_dir / "config.yaml").is_file() and (policy_dir / "env.yaml").is_file():
-            _adapt_agile_env_to_mjlab_config(
+            adapt_agile_env_to_mjlab_config(
                 policy_dir / "env.yaml", policy_dir / "config.yaml"
             )
         policy_root = policy_dir.parent
@@ -921,11 +878,13 @@ def main() -> int:
             else:
                 print(f"[eval] {name}: init_base_quat_wxyz = identity  (no override)")
         for vx in args.cmd_vx:
+         for vy in args.cmd_vy:
             for k in range(n_seeds):
                 seed = seed_start + k
                 cfg = EvalConfig(
                     policy_name=name,
                     command_vx=float(vx),
+                    command_vy=float(vy),
                     duration_s=float(args.duration),
                     warmup_s=float(args.warmup),
                     fall_height_m=float(args.fall_height),
@@ -952,9 +911,27 @@ def main() -> int:
                     obs_dropout_prob=float(args.obs_dropout_prob),
                     init_base_quat_wxyz=policy_init_quat,
                 )
-                print(f"[eval] {name:<42} vx={vx:>5.2f} seed={seed} ...", flush=True)
+                print(f"[eval] {name:<42} vx={vx:>+5.2f} vy={vy:>+5.2f} seed={seed} ...", flush=True)
+                episode_video: Optional[Path] = None
+                if args.video:
+                    base = Path(args.video)
+                    total_runs = len(policies) * len(args.cmd_vx) * len(args.cmd_vy) * n_seeds
+                    if total_runs == 1:
+                        episode_video = base
+                    else:
+                        stem = base.stem or "rollout"
+                        suffix = base.suffix or ".mp4"
+                        episode_video = base.with_name(
+                            f"{stem}__{name}__vx{vx:+.2f}__vy{vy:+.2f}__seed{seed}{suffix}"
+                        )
                 try:
-                    m = run_episode(cfg, policy_dir=pdir)
+                    m = run_episode(
+                        cfg,
+                        policy_dir=pdir,
+                        video_path=episode_video,
+                        video_width=int(args.video_width),
+                        video_height=int(args.video_height),
+                    )
                 except Exception as exc:
                     print(f"[eval][ERR] {name} vx={vx} seed={seed}: {type(exc).__name__}: {exc}")
                     continue
