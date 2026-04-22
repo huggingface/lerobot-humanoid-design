@@ -42,6 +42,41 @@ POLICY_ACTION_KEYS = [
 # Snapshot joint_state_* order from robot API:
 # [left(6), right(6)] -> policy order [right(6), left(6)].
 SNAPSHOT_TO_POLICY_JOINT_IDX = np.array([6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5], dtype=np.int64)
+
+# Isaac Lab articulation order (empirically verified by loading the URDF):
+#   [hipz_left, hipz_right, hipx_left, hipx_right, hipy_left, hipy_right,
+#    knee_left, knee_right, ankley_left, ankley_right, anklex_left, anklex_right]
+# Snapshot order is [left(6), right(6)] with (hipz, hipx, hipy, knee, ankle_pitch, ankle_roll)
+# per side, i.e. left indices 0..5 → (l_hipz, l_hipx, l_hipy, l_knee, l_ankle_p, l_ankle_r),
+# right indices 6..11 analogous. Map: IL[i] ← snapshot[SNAPSHOT_TO_ISAACLAB_JOINT_IDX[i]].
+SNAPSHOT_TO_ISAACLAB_JOINT_IDX = np.array([0, 6, 1, 7, 2, 8, 3, 9, 4, 10, 5, 11], dtype=np.int64)
+
+# Action-key names (used to resolve per-joint scale/bias and to route q_cmd back to
+# the left/right side dicts) in Isaac Lab action order.
+ISAACLAB_ACTION_KEYS = [
+    "left.hipz", "right.hipz",
+    "left.hipx", "right.hipx",
+    "left.hipy", "right.hipy",
+    "left.knee", "right.knee",
+    "left.ankle_pitch", "right.ankle_pitch",
+    "left.ankle_roll", "right.ankle_roll",
+]
+
+# Joint names in Isaac Lab articulation order (for reading default_joint_pos).
+ISAACLAB_JOINT_POS_NAMES = [
+    "hipz_left", "hipz_right",
+    "hipx_left", "hipx_right",
+    "hipy_left", "hipy_right",
+    "knee_left", "knee_right",
+    "ankley_left", "ankley_right",
+    "anklex_left", "anklex_right",
+]
+
+# Map from Isaac Lab index i → POLICY_ACTION_KEYS index j (same physical joint).
+# Used to permute default_joint_pos (stored in POLICY order) to IL order for the
+# obs-side joint_pos/joint_vel relative-to-default subtraction.
+ISAACLAB_TO_POLICY_JOINT_IDX = np.array([6, 0, 7, 1, 8, 2, 9, 3, 10, 4, 11, 5], dtype=np.int64)
+
 JOINT_TORQUE_TERM_NAMES = ("joint_torque", "joint_torques", "joint_effort", "joint_efforts")
 
 
@@ -198,6 +233,10 @@ def _extract_action_keys(cfg: Dict[str, Any]) -> List[str]:
 
     if len(parsed) == 12:
         return parsed
+    # No explicit action names resolved (AGILE configs store regex patterns, which
+    # are filtered out above). Fall back to a layout-appropriate default.
+    if str(cfg.get("_obs_layout", "")).strip().lower() == "isaaclab":
+        return list(ISAACLAB_ACTION_KEYS)
     return list(POLICY_ACTION_KEYS)
 
 
@@ -307,6 +346,12 @@ def _extract_encoder_bias_rad(cfg: Dict[str, Any], action_keys: List[str]) -> Li
 
 
 def _extract_default_joint_pos_rad_from_cfg(cfg: Dict[str, Any]) -> Optional[np.ndarray]:
+    """Return the default joint positions (rad) in POLICY_ACTION_KEYS order.
+
+    This is used by the action path (`q_cmd_rad[idx] = default[idx] + act * scale`)
+    which assumes POLICY order. For the obs path under the Isaac Lab layout, use
+    `_extract_default_joint_pos_rad_obs_order` instead.
+    """
     joint_pos = _get_first(
         cfg,
         keys=(
@@ -548,6 +593,9 @@ class RLAgent:
     _running: bool = field(default=False, init=False)
     _thread: Optional[threading.Thread] = field(default=None, init=False)
     _default_joint_pos_rad: Optional[np.ndarray] = field(default=None, init=False)
+    # Same default, permuted into `spec.obs_layout`'s joint order so the obs-path
+    # subtraction `q_rad - default` stays consistent with the ONNX training frame.
+    _default_joint_pos_rad_obs: Optional[np.ndarray] = field(default=None, init=False)
     _command_twist: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float32), init=False)
     _command_source: Optional[Any] = field(default=None, init=False)
     _last_obs: Optional[np.ndarray] = field(default=None, init=False)
@@ -598,7 +646,14 @@ class RLAgent:
             raise ValueError("Missing init_state.joint_pos with 12 joints in config.")
         policy = PolicyWrapper.load(Path(policy_path), cfg)
         agent = cls(robot=robot, spec=spec, policy=policy)
-        agent._default_joint_pos_rad = q_ref[:12].astype(np.float32, copy=True)
+        default_policy = q_ref[:12].astype(np.float32, copy=True)
+        agent._default_joint_pos_rad = default_policy
+        if spec.obs_layout == "isaaclab":
+            # Permute POLICY-ordered default → Isaac Lab articulation order so the
+            # obs-path `q_rad - default` is consistent with the ONNX training frame.
+            agent._default_joint_pos_rad_obs = default_policy[ISAACLAB_TO_POLICY_JOINT_IDX].copy()
+        else:
+            agent._default_joint_pos_rad_obs = default_policy.copy()
         if log_observation or log_action:
             resolved_log_path = Path(log_path) if log_path else Path("rl_agent_isolated_debug_log.csv")
             agent.configure_logging(
@@ -729,10 +784,16 @@ class RLAgent:
         }
 
     def _policy_order_joint_state(self, snapshot: Dict[str, Any], key: str) -> np.ndarray:
+        """Return the snapshot's 12-dim joint-state vector remapped into the order
+        the policy was trained with. For mjlab (canonical), that's right(6)+left(6);
+        for Isaac Lab, it's interleaved L/R by joint type per the articulation's
+        PhysX-assigned index ordering."""
         vals = np.asarray(snapshot.get(key, [0.0] * 12), dtype=np.float32).reshape(-1)
         if vals.size < 12:
             vals = np.pad(vals, (0, 12 - vals.size))
         vals = vals[:12]
+        if self.spec.obs_layout == "isaaclab":
+            return vals[SNAPSHOT_TO_ISAACLAB_JOINT_IDX]
         return vals[SNAPSHOT_TO_POLICY_JOINT_IDX]
 
     def _apply_obs_term_scale(self, term_name: str, values: np.ndarray) -> np.ndarray:
@@ -797,9 +858,12 @@ class RLAgent:
             else:
                 qd_fd = np.zeros_like(q_rad, dtype=np.float32)
             if term_name == "joint_pos":
-                if self._default_joint_pos_rad is None:
+                default_obs = self._default_joint_pos_rad_obs
+                if default_obs is None:
+                    default_obs = self._default_joint_pos_rad
+                if default_obs is None:
                     return np.zeros(12, dtype=np.float32)
-                qpos_now = (q_rad - self._default_joint_pos_rad).astype(np.float32, copy=False)
+                qpos_now = (q_rad - default_obs).astype(np.float32, copy=False)
                 qpos_now = self._apply_obs_term_scale(term_name, qpos_now)
                 self._curr_obs_joint_pos = qpos_now.copy()
                 return qpos_now
