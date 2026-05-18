@@ -5,6 +5,15 @@ This repository contains the early-stage design work for the next LeRobot humano
 For the detailed methodology, equations, assumptions, and first results, see:
 `docs/lerobot_humanoid_design_notes.pdf`
 
+## Project Aim
+
+The goal is to iteratively co-design a compact, maintainable humanoid platform for learning-based control and reproducible robotics research.
+This repository currently focuses on the first milestone of that roadmap:
+
+- Build a consistent baseline URDF model (`humanoid_v0`).
+- Validate feasibility assumptions with optimal-control-based studies.
+- Use optimization outputs to guide mechanical/CAD iterations.
+
 ## Scope
 
 - URDF assets for baseline lower-body and upper-body studies.
