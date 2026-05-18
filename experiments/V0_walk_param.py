@@ -1,3 +1,7 @@
+# NOTE:
+# This file intentionally mirrors `codesign/hip/V0_walk_param.py`.
+# Experiments keep a local copy to iterate on task-cost settings without
+# changing the reference co-design parameterization.
 import numpy as np
 import pinocchio as pin
 def roundToOdd(x):
