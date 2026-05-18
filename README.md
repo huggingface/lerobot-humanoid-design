@@ -1,85 +1,50 @@
 # LeRobot Humanoid Design
 
-This repository gathers the design work for the next humanoid robot developed within the LeRobot team.
+This repository contains the early-stage design work for the next LeRobot humanoid: URDF modeling, mechanical co-design studies, and optimal-control-based validation.
 
-It centralizes early-stage engineering and research efforts related to robot modeling, mechanical co-design, and validation through optimization and optimal control.
+For the detailed methodology, equations, assumptions, and first results, see:
+`docs/lerobot_humanoid_design_notes.pdf`
 
-The current focus includes:
+## Scope
 
-a bipedal platform (lower body) already modeled and prototyped,
-
-and ongoing co-design of the upper body.
----
-
-## Goals
-
-The goal of this repository is to centralize all design-related artifacts for the new humanoid robot, including:
-
-Robot models (URDF)
-
-Mechanical co-design algorithms and experiments
-
-Verification and validation through optimal control
-
-Design reports and internal technical notes
-
-Methodology documentation for future extensions
-
-This repository is intended to evolve alongside the robot design.
+- URDF assets for baseline lower-body and upper-body studies.
+- Hip co-design optimization loop (CMA-ES + OCP evaluation).
+- Experiment scripts for walking, side-walking, and hip-axis sensitivity.
+- Upper-body co-design tooling and evaluators.
 
 ## Current Status
 
-✅ URDF of the bipedal platform (lower body) added
+- `humanoid_v0` baseline model is available and used in optimization/experiments.
+- First hip co-design pipeline is operational.
+- Bipedal-platform simulation studies are operational.
+- Upper-body optimization is still WIP.
 
-✅ Experimentation on 1 leg
+## Design Process (Summary)
 
-🚧 Upper body co-design in progress
+The current process follows the roadmap documented in the design note:
 
-🗓️ Currently at Week 7 of the design roadmap
+1. Build a consistent baseline model (`humanoid_v0`) with actuator assumptions, mass/inertia estimates, and torque limits.
+2. Parameterize hip geometry (axis arrangement) and sample candidate vectors.
+3. Evaluate each candidate with OCPs (forward walking + side walking).
+4. Aggregate the objective with a weighted scalar cost (`0.66 * J_walk + 0.33 * J_side`).
+5. Iterate between model parameters, optimization outputs, and CAD updates.
 
+The same co-design philosophy is now being extended to the upper body, but this part is not finalized yet.
 
-## CAD reference (Onshape)
+## Repository Layout
 
-The main CAD model is available on Onshape:
-👉
-
-This model is expected to evolve alongside the URDF and co-design studies.
----
-## Roadmap (high level)
-
-The humanoid design follows an iterative, co-design-driven roadmap:
-
-Weeks 1–2
-Baseline humanoid modeling (URDF v0), first hip co-design experiments, and actuator/middleware validation.
-
-Weeks 2–5
-Development of a first full CAD model and actuation assumptions.
-
-Weeks 6–9 (current phase)
-Assembly and validation of a first robotic leg prototype, and integration of the bipedal platform into the design workflow.
-
-Medium term
-Integration into a first full humanoid prototype (v0), including upper body design.
-
-Long term
-Iterative redesign, further design optimization, and public releases.
-
-
----
+- `urdf/`: robot models and loading utilities.
+- `codesign/hip/`: hip optimization and vector evaluation scripts.
+- `codesign/upper_body/`: upper-body evaluators and optimization scripts.
+- `experiments/`: standalone experiment scripts and experiment-local parameter variants.
+- `docs/`: technical notes and project documentation.
 
 ## Installation
 
+The Python environment is described in `environement.lock`.
 
-Requirements
+Additional dependencies used by the current scripts:
 
-The required Python environment is described in environment.lock.
-
-In addition, the following dependencies are required:
-
-A fork of Crocoddyl: https://github.com/LudovicDeMatteis/crocoddyl/tree/topic/contact-6D-closed-loop
-
-A fork of Sobec : wip
-
-meshcat (for visualization)
-
-
+- Crocoddyl fork: `https://github.com/LudovicDeMatteis/crocoddyl/tree/topic/contact-6D-closed-loop`
+- Sobec fork/work-in-progress (project-specific setup)
+- `meshcat` for visualization
