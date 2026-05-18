@@ -28,17 +28,50 @@ This repository currently focuses on the first milestone of that roadmap:
 - Bipedal-platform simulation studies are operational.
 - Upper-body optimization is still WIP.
 
-## Design Process (Summary)
+## Co-Design Methodology
 
-The current process follows the roadmap documented in the design note:
+The project uses an iterative mechanical/control co-design loop:
 
-1. Build a consistent baseline model (`humanoid_v0`) with actuator assumptions, mass/inertia estimates, and torque limits.
-2. Parameterize hip geometry (axis arrangement) and sample candidate vectors.
-3. Evaluate each candidate with OCPs (forward walking + side walking).
-4. Aggregate the objective with a weighted scalar cost (`0.66 * J_walk + 0.33 * J_side`).
-5. Iterate between model parameters, optimization outputs, and CAD updates.
+1. Define a baseline robot model with explicit hardware assumptions (`humanoid_v0` mass, inertia, actuator limits, geometry).
+2. Choose a parametric design space for the subsystem under study (for example hip axis orientations, upper-body joint placements).
+3. Define benchmark tasks that represent the expected use cases.
+4. Evaluate each design candidate by solving task-level problems:
+   - Hip: locomotion OCPs (forward walk + side walk) solved with Sobec/Crocoddyl.
+   - Upper body: closed-loop constrained IK + local refinement along motion trajectories under force/manipulability objectives.
+5. Aggregate task costs into a scalar design objective (for hip: `0.66 * J_walk + 0.33 * J_side`).
+6. Run an outer optimization loop (CMA-ES), keep best vectors, and feed results back to CAD/URDF updates.
+7. Repeat the cycle as assumptions and constraints are refined.
 
-The same co-design philosophy is now being extended to the upper body, but this part is not finalized yet.
+This repository captures the first implemented iteration of this methodology (hip completed, upper body ongoing).
+
+## Why OCP Helps Design Choices
+
+An OCP solver is used here as a fast design critic, not just as a motion generator.
+This is true even without a co-design optimizer: a single OCP run is already a quick integrity check for a given robot design.
+
+Without any optimization loop, OCP helps answer:
+- Is the design dynamically feasible for a target task?
+- Are actuator limits respected with margin, or constantly saturated?
+- Does the solver converge robustly, or only with fragile behavior?
+- Which joints/axes are the bottlenecks in torque or tracking?
+
+Because this check takes only a few seconds, it is practical during day-to-day design iteration (URDF/CAD updates) before committing to hardware changes.
+
+For each candidate geometry:
+1. Inject the design vector into the model (joint placements / axis orientations).
+2. Solve the same benchmark task OCP with the same settings.
+3. Read objective terms and constraints (torque-limit penalties, tracking error, velocity target, solver convergence).
+4. Keep candidates that are feasible and low-cost; reject those that only work with high penalties or unstable convergence.
+
+In practice, when one solve takes only a few seconds, we can evaluate many candidates in a CMA-ES loop.
+This turns "can this design move?" into a quantitative score that is fast enough for iterative mechanical co-design.
+
+## Upper-Body Co-Design Status (WIP)
+
+- The tooling supports evaluation of shoulder and elbow-related design vectors (`codesign/upper_body`).
+- In practice, elbow-focused axis optimization currently gives usable behavior.
+- Shoulder optimization is currently not reliably convergent, so upper-body results are considered exploratory.
+- The current structure is intentional for development: it allows cost-function tuning and debugging separately from geometric modeling changes.
 
 ## Repository Layout
 
