@@ -1,7 +1,0 @@
-{
-    "url": "https://cad.onshape.com/documents/fb645318a27646d1d8840be6/w/d1cae8805fb652b4d1614997/e/21abaf55b2c565e5fb36d5c7",
-    "documentId": "fb645318a27646d1d8840be6",
-    "outputFormat": "urdf",
-    "assemblyName": "leg",
-    "whitelist":["foot","hipxy","hipz12","hipz22","tibias12","tibias22","femur","torso12","torso22"]
-}
