@@ -1,6 +1,9 @@
 import pinocchio as pin
 import numpy as np
-from toolbox_parallel_robots.mounting import closedLoopMountProximal,closedLoopMountScipy,closedLoopMountCasadi
+from toolbox_parallel_robots.mounting import closedLoopMountProximal
+
+PRINT_TRAJECTORY_PLACEMENTS = False
+
 
 def moveHandAB(robot,hand,A,B,q_init=None):
     """
@@ -66,7 +69,8 @@ def moveHandAB(robot,hand,A,B,q_init=None):
         q_sol = closedLoopMountProximal(model, data, nconstraint_model+[constraint_model], ncdata+[constraint_data],q_prec=q_sol)
         qsols.append(q_sol)
         # viz.display(q_sol)
-        print(placement)
+        if PRINT_TRAJECTORY_PLACEMENTS:
+            print(placement)
 
 
 

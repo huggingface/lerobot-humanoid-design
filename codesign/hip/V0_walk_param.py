@@ -1,3 +1,7 @@
+# NOTE:
+# This file is intentionally duplicated in `experiments/V0_walk_param.py`.
+# Keeping a local copy here preserves co-design defaults while experiments can
+# tune/test costs independently without touching the co-design module.
 import numpy as np
 import pinocchio as pin
 def roundToOdd(x):

@@ -39,8 +39,6 @@ def rotation_matrix_to_euler_xyz(R):
 
     return x, y, z
 
-from scipy.spatial.transform import Rotation as R
-
 evaluate=ArmEvaluator()
 dx=np.array([ 45.9095, 137.2909, -81.4492, -30.54  ,  -9.0298,  37.7497])
 evaluate.evaluate(dx) #modify the robot

@@ -3,7 +3,7 @@ from codesign.upper_body.move_arms_utils import *
 from toolbox_parallel_robots.jacobian   import *
 from toolbox_parallel_robots.actuation_data import *
 from sympy import Matrix
-from toolbox_parallel_robots.mounting import closedLoopMountProximal,closedLoopMountScipy,closedLoopMountCasadi
+from toolbox_parallel_robots.mounting import closedLoopMountProximal
 
 np.set_printoptions(precision=4, suppress=True)
 
@@ -59,6 +59,9 @@ class ArmEvaluator:
         self.viz.loadViewerModel(rootNodeName="universe")
         
     def tunemodel(self,dx,display=False):
+        # NOTE:
+        # `dx` can be 6D (shoulder-only co-design) or 8D (adds elbow terms in
+        # `tuneArmModel`). Current optimization scripts default to 6D.
         new_model=tuneArmModel(self.original_model,dx)
         new_data=new_model.createData()
 
@@ -397,6 +400,10 @@ class ArmEvaluator:
             oMf=self.data.oMf[arme_frme_id]
             dist=np.linalg.norm(oMf.translation-translation)
             total_cost+=dist+cost/100000
+            # NOTE:
+            # Intentional current behavior: always accept `nq` for manipulability
+            # trajectory tracking. The deviation gate below is kept only for debug
+            # messages and can be reactivated later if needed.
             q=nq
             if disp and np.linalg.norm(nq - q) < 35e-1:
                 q=nq
@@ -413,204 +420,3 @@ class ArmEvaluator:
         cout1=self.evaluateForce(dx,disp)
         # cout2=self.evaluateManipuliability(dx,disp)
         return(cout1)#+cout2/10)
-    
-
-if __name__=="__main__":
-
-
-    evaluate = ArmEvaluator()
-    
-    dx=np.array([-1.2386,  0.7196,  2.974 , -1.0484, -4.4469, -5.9738])
-    dx=np.array([ 45.9095, 137.2909, -81.4492, -30.54  ,  -9.0298,  37.7497])
-    from cmaes import CMA
-    optimizer = CMA(mean=np.float64(dx), sigma=15)
-    for generation in range(60):
-        solutions = []
-        for _ in range(optimizer.population_size):
-            x = optimizer.ask()
-            value =evaluate.evaluate(x)
-            solutions.append((x, np.float64(value)))
-            print(f"#{generation} {value} (x1={x[0]}, x2 = {x[1]})")
-        optimizer.tell(solutions)
-
-
-
-    dx1=np.array([-1.2386,  0.7196,  2.974 , -1.0484, -4.4469, -5.9738, -2.6952,
-         -4.374 ])
-    
-
-    dx2=np.array([-2.3684, -0.8973,  3.9837, -3.3336, -5.7216, -3.4934, -3.1598,
-         -2.4684])
-    
-    dx3=np.array([-0.1227,  0.4567,  5.4507, -2.4195, -6.3413, -6.6535, -5.2577,
-         -5.1175])
-    
-    dx4=np.array([ 13.6416,  38.854 ,  64.0544,  58.2893,  18.4691,  15.987 ,
-          13.7576, -21.0037])
-    
-    dx5=np.array([ 45.9095, 137.2909, -81.4492, -30.54  ,  -9.0298,  37.7497]) #2116
-
-    dx6 = np.array([ 54.262 , 153.5354, -97.7809, -53.5955, -12.3195,  29.3566]) #1875
-    dx6 = np.array([ 54. , 153.5, -97., -53.5, -12.,  29.]) #2163
-# A = pin.SE3.Identity()
-# A.translation = np.array([0.23, -0.1, 0.2])
-# B = pin.SE3.Identity()
-# B.translation = np.array([0.23, -0.1, 0.5])
-
-# eval = ArmEvaluator()
-
-# Feval=np.array([0,0,10,0,0,0])
-
-
-
-
-# dx=np.array([-90,0,-30,0,0,0])
-# # eval.evaluateForce(dx)
-# eval.evaluateManipuliability(dx)
-
-# # self=eval
-
-
-# A = pin.SE3.Identity()
-# A.translation = np.array([0.23, -0.1, 0.2])
-# B = pin.SE3.Identity()
-# B.translation = np.array([0.23, -0.1, 0.5])
-# Feval=np.array([0,0,10,0,0,0])
-
-# self.tunemodel(dx,False)
-# q=np.zeros(self.model.nq)
-# cout1=self.evaluate_on_trajAB(A,B,q,Feval=Feval,disp=True)
-
-
-# ## resultat different :
-
-
-# self.tunemodel(dx,False)
-
-# A = pin.SE3.Identity()
-# A.translation = np.array([0.23, -0.1, 0.2])
-# B = pin.SE3.Identity()
-# B.translation = np.array([0.23, -0.1, 0.5])
-# Feval=np.array([0,0,10,0,0,0])
-
-
-# q=np.zeros(self.model.nq)
-# cout1=self.evaluate_on_trajAB(A,B,q,Feval=Feval,disp=True)
-
-
-# A = pin.SE3.Identity()
-# A.translation = np.array([0.15, -0.1, 0.35])
-# B = pin.SE3.Identity()
-# B.translation = np.array([0.32, -0.1, 0.35])
-# Feval=np.array([10,0,0,0,0,0])
-# cout2=self.evaluate_on_trajAB(A,B,q,Feval=Feval,disp=True)
-
-
-# eval.tunemodel(dx,True)
-# q=np.zeros(eval.model.nq)
-# A = pin.SE3.Identity()
-# A.translation = np.array([0.2, -0.25, 0.25])
-# B = pin.SE3.Identity()
-# B.translation = np.array([0.2, -0.25, 0.55])
-# t=eval.evaluate_on_trajAB_manipulability(A,B,q,disp=True)
-# print(t)
-# eval.evaluate_on_trajAB(A,B,q,Feval=Feval,disp=True)
-
-# robot=loadUpperBody()
-# q_init = robot.model.referenceConfigurations["half_sitting"]
-# qsols= moveHandAB(robot,"hand",A,B,q_init=q_init)
-# model=robot.model
-# data=model.createData()
-# actuation_model = robot.actuationModel
-# actuation_data = ActuationData(model, [], actuation_model)
-
-
-
-
-
-
-# vq=inverseConstraintKinematicsSpeed(model,data,[],[],actuation_model,actuation_data,qsols[0],14,np.array([0,0,0,0,0,0.1]))
-
-
-# q=pin.integrate(model,qsols[0],vq*1e-2)
-# qsols=[]
-# for i in range(100):
-#     velocity=[0,0,1,0,0,0]
-#     pin.forwardKinematics(model, data, q, np.zeros(model.nv))
-#     oMf=pin.updateFramePlacement(model,data,14)
-    
-#     vq=inverseConstraintKinematicsSpeed(model,data,[],[],actuation_model,actuation_data,q,14,oMf.inverse().action@velocity)
-#     q=pin.integrate(model,q,vq*1e-3)
-#     qsols.append(q)
-
-# import meshcat
-# from pinocchio.visualize import MeshcatVisualizer
-# viz = MeshcatVisualizer(robot.model, robot.visual_model, robot.visual_model)
-# viz.viewer = meshcat.Visualizer(zmq_url="tcp://127.0.0.1:6000")
-# viz.clean()
-# viz.loadViewerModel(rootNodeName="universe")
-# for q in qsols:
-#     viz.display(q)
-
-
-# from sympy import Matrix
-
-# import time
-# t_init=time.time()
-# alphas=np.linspace(-1000,1000,1000)
-# for i in range(100):
-#     #find jacobian dor last configuration
-#     vq=inverseConstraintKinematicsSpeed(model,data,[],[],actuation_model,actuation_data,q,14,oMf.inverse().action@velocity)
-#     J= actuation_data.Jf_closed
-    
-#     #find nullspace
-#     A=Matrix(J[:3,:4])
-#     vq=np.array(A.nullspace()[0])
-#     nvq=np.zeros(model.nv)
-#     nvq[6:]=vq.T
-
-#     #deduct new configuration
-#     q=pin.integrate(model,q,nvq*1e-5)
-#     # viz.display(q)
-# t_end=time.time()   
-# print("time sympy:",t_end-t_init)
-
-
-# def gradient(q,forces):
-#     inverseConstraintKinematicsSpeed(model,data,[],[],actuation_model,actuation_data,q,14,np.zeros(model.nv))
-#     J= actuation_data.Jf_closed
-#     cost1=J.T @ forces
-#     A=Matrix(J[:3,:4])
-#     vq=np.array(A.nullspace()[0])
-#     nvq=np.zeros(model.nv)
-#     nvq[6:]=vq.T
-
-#     #deduct new configuration
-#     q=pin.integrate(model,q,nvq*1e-5)    
-#     inverseConstraintKinematicsSpeed(model,data,[],[],actuation_model,actuation_data,q,14,np.zeros(model.nv))
-#     J= actuation_data.Jf_closed
-#     cost2=J.T @ forces
-#     grad=(cost2-cost1)/1e-5
-#     return grad
-
-
-
-# import time
-# alphas=np.linspace(-1000,1000,1000)
-# vq=np.zeros(model.nv)
-# for alpha in alphas:
-#     J= actuation_data.Jf_closed
-#     v=oMf.inverse().action@velocity
-#     A=J[:3,:4]
-
-#     # vq=np.linalg.pinv(J)@v + (np.eye(4)-np.linalg.pinv(J[:3,:4])@J[:3,:4])*np.array([1,1,1,1])*alpha
-#     mul=(np.eye(4)-np.linalg.pinv(A) @A)@np.array([1,1,1,1])
-#     vq[6:]= np.linalg.pinv(J)@v + mul*alpha
-#     cq=pin.integrate(model,q,vq*1e-3)
-#     viz.display(cq)
-
-
-
-
-# q = np.array([0.0, 0.0, 0.0, 0.0])
-

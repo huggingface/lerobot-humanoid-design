@@ -3,13 +3,12 @@ import pinocchio as pin
 import numpy as np
 import sobec
 import os
-import yaml
-from yaml.loader import SafeLoader
 from example_parallel_robots.loader_tools import completeRobotLoader
-from toolbox_parallel_robots.mounting import closedLoopMountProximal,closedLoopMountScipy,closedLoopMountCasadi
+from toolbox_parallel_robots.mounting import closedLoopMountProximal
 pin.SE3.__repr__ = pin.SE3.__str__
 
 CWD = os.path.dirname(os.path.abspath(__file__))
+PRINT_FRAME_NAMES = False
 
 
 
@@ -256,7 +255,8 @@ def loadbasic():
 
     model.referenceConfigurations["half_sitting"] = q0
 
-    print([f.name for f in model.frames])
+    if PRINT_FRAME_NAMES:
+        print([f.name for f in model.frames])
     idfoot=[model.getFrameId(n) for n in ["foot_left","foot_right"]]
     for idf in idfoot:
         model.frames[idf].name += "48646"
@@ -364,7 +364,8 @@ def loadBipedalPlateform():
 
     model.referenceConfigurations["half_sitting"] = q0
 
-    print([f.name for f in model.frames])
+    if PRINT_FRAME_NAMES:
+        print([f.name for f in model.frames])
     idfoot=[model.getFrameId(n) for n in ["foot_left","foot_right"]]
     for idf in idfoot:
         model.frames[idf].name += "48646"
@@ -492,7 +493,8 @@ def loadTunedHipx(angle = 0):
 
     model.referenceConfigurations["half_sitting"] = q0
 
-    print([f.name for f in model.frames])
+    if PRINT_FRAME_NAMES:
+        print([f.name for f in model.frames])
     idfoot=[model.getFrameId(n) for n in ["foot_left","foot_right"]]
     for idf in idfoot:
         model.frames[idf].name += "48646"
@@ -740,7 +742,8 @@ def create_robot(dx):
 
     model.referenceConfigurations["half_sitting"] = q0
 
-    print([f.name for f in model.frames])
+    if PRINT_FRAME_NAMES:
+        print([f.name for f in model.frames])
     idfoot=[model.getFrameId(n) for n in ["foot_left","foot_right"]]
     for idf in idfoot:
         model.frames[idf].name += "48646"

@@ -1,30 +1,19 @@
-
 import pinocchio as pin
-from pinocchio.robot_wrapper import RobotWrapper
-import re
-import yaml
-from yaml.loader import SafeLoader
-from warnings import warn
-from os.path import dirname, exists, join
-import sys
 import numpy as np
-from toolbox_parallel_robots import freezeJoints, ActuationModel
-from example_parallel_robots.robot_options import ROBOTS
-from example_parallel_robots.path import EXAMPLE_PARALLEL_ROBOTS_MODEL_DIR, EXAMPLE_PARALLEL_ROBOTS_SOURCE_DIR
-from toolbox_parallel_robots.mounting import closedLoopMountProximal,closedLoopMountScipy,closedLoopMountCasadi
-
-from urdf.humanoids_loader import loadRobot,tuneModel,create_robot
-
-
+from toolbox_parallel_robots.mounting import closedLoopMountProximal
+from urdf.humanoids_loader import loadRobot, tuneModel
 from codesign.hip.V0_walk_param import WalkV0Params
 from codesign.hip.V0_sidewalk_param import SideWalkV0Params
 import sobec
-import crocoddyl as croc
-
 import copy
-
-
+from cmaes import CMA
 import matplotlib.pyplot as plt
+
+
+PRINT_FRAME_NAMES = False
+PRINT_EACH_CANDIDATE = False
+
+
 class V0Loader():
     def __init__(self):
         self.model,self.constraint_models,self.actuation_model,self.visual_model,self.collision_model = loadRobot()
@@ -51,7 +40,12 @@ class V0Loader():
         model.jointPlacements[12]=ankle_right_placement*SE3       
 
 
-        place = 0.02   # correction of ankle position to have a perfect Ujoint 
+        # NOTE:
+        # A 7th optimization parameter is currently passed around in some scripts/history,
+        # but ankle offset is hardcoded here. If we want to free this DOF again, replace
+        # `place = 0.02` by a value derived from `dx[6]` and keep `tuneModel`/evaluate
+        # dimensions consistent.
+        place = 0.02   # correction of ankle position to have a perfect Ujoint
         SE3=pin.SE3.Identity()
         SE3.translation[0]=place
         model.jointPlacements[13]=model.jointPlacements[13] * SE3
@@ -129,7 +123,8 @@ class V0Loader():
 
         model.referenceConfigurations["half_sitting"] = q0
 
-        print([f.name for f in model.frames])
+        if PRINT_FRAME_NAMES:
+            print([f.name for f in model.frames])
         idfoot=[model.getFrameId(n) for n in ["foot_left","foot_right"]]
         for idf in idfoot:
             model.frames[idf].name += "48646"
@@ -305,117 +300,33 @@ class EvaluateRobot():
         plt.show()
 
 if __name__ == "__main__":
-    dx1 = np.array([0.,0.,0.,90.,0.,0.])
-    dx2 = np.array([0.,0.,0.,45.,0.,0.])
-    dx3=np.array([ -6.30157784,  -2.9773718 , -67.92956906,  37.73483886,
-       -23.44075896, -79.37300617])
-    dx4=np.array([-6.65684339,  -1.73665785, -68.81551501,  37.43446151,
-         -23.24196683, -78.50777904])
-    dx5=np.array([ -5.76495799,  -2.60621304, -62.80618123,  36.23841476,
-         -22.81023506, -78.14087952])
-
-
-    dx6= np.array([ -8.41673617,  -0.67836718, -56.14311573,  17.5914297 ,
-         -24.48712805, -80.15278452])
-
-    dx7= np.array([ -7.54528979,  -0.98467531, -57.23192973,  15.80347566,
-         -25.11051615, -76.66889449])
-
-
-
-    dx8 = np.array([ -8.10875616,  -0.8085541 , -56.51608165,  14.00093572,
-         -11.02247696, -84.22985613])
-    
-    dx9 =np.array([ -7.07608636,  -1.1400171 , -57.48542757,  13.71672827,
-         -11.36045942, -83.37281477])
-
-    dx10 = np.array([ -8.08829439,  -0.20494419, -56.72015355,  18.32296692,
-         -23.56834157, -80.45340603])
     evaluate = EvaluateRobot()
-    stop
-    Lvalue=[]
-    for dx in [dx1,dx2,dx3,dx4,dx5]:
-        value =evaluate.evaluate(dx)
-        Lvalue.append(copy.copy(value))
-
-
-
-    Lvalue =[]
-    Lpoint=[0,1,50,100,150,200]
-    for dx in [dx1,dx2,dx3,dx4,dx6,dx7]:
-        Lvalue.append(evaluate.evaluate(dx))
-
-    stop
-
-
-    from cmaes import CMA
-
-
-    dx= np.array([ -8.41673617,  -0.67836718, -56.14311573,  17.5914297 ,
-         -24.48712805, -80.15278452,0.])
-
-    Lvalue=[]
-    Lplace=[0.03,0.02,0.01,0,-0.01,-0.02,-0.03,-0.04]
-    for place in Lplace:
-        dx[-1]=place
-        value =evaluate.evaluate(dx)
-        Lvalue.append(copy.copy(value))
-        print(f"place={place} value={value}")
-    plt.figure()
-    plt.plot(Lplace,Lvalue)
-    plt.xlabel("Ankle position")            
-    plt.ylabel("Cost function")
-    plt.show()
-
-
-
-    from cmaes import CMA
+    dx = np.zeros(7, dtype=float)
     optimizer = CMA(mean=np.float64(dx), sigma=1.3)
+    best_value = None
+    best_x = None
+
     for generation in range(50):
         solutions = []
+        generation_best_value = None
+        generation_best_x = None
         for _ in range(optimizer.population_size):
             x = optimizer.ask()
-            value =evaluate.evaluate(x)
+            value = evaluate.evaluate(x)
             solutions.append((x, np.float64(value)))
-            print(f"#{generation} {value} (x1={x[0]}, x2 = {x[1]})")
+            if generation_best_value is None or value < generation_best_value:
+                generation_best_value = value
+                generation_best_x = np.array(x, dtype=float)
+            if best_value is None or value < best_value:
+                best_value = value
+                best_x = np.array(x, dtype=float)
+            if PRINT_EACH_CANDIDATE:
+                print(f"#{generation} value={value} x={x}")
         optimizer.tell(solutions)
+        print(
+            f"#{generation} best_generation_value={generation_best_value} "
+            f"best_generation_x={generation_best_x}"
+        )
 
-
-
-import numpy as np
-
-def rotation_matrix_to_euler_xyz(R):
-    """
-    Convert a 3x3 rotation matrix to Euler angles (XYZ order).
-
-    Convention:
-        - Right-handed coordinate system
-        - Active rotations on column vectors
-        - Overall rotation: R = Rz(z) @ Ry(y) @ Rx(x)
-        - Returns angles (x, y, z) in radians
-
-    Parameters
-    ----------
-    R : array_like, shape (3, 3)
-        Rotation matrix.
-
-    Returns
-    -------
-    x, y, z : float
-        Euler angles around X, Y, Z axes (in radians).
-    """
-    R = np.asarray(R, dtype=float)
-    if R.shape != (3, 3):
-        raise ValueError("R must be a 3x3 matrix")
-
-    # Protect against numerical issues:
-    # For this convention, sin(y) = -R[2,0]
-    sy = -R[2, 0]
-    sy = np.clip(sy, -1.0, 1.0)
-
-    # Compute angles
-    y = np.arcsin(sy)                  # rotation about Y
-    x = np.arctan2(R[2, 1], R[2, 2])   # rotation about X
-    z = np.arctan2(R[1, 0], R[0, 0])   # rotation about Z
-
-    return x, y, z
+    print("best_value=", best_value)
+    print("best_x=", best_x)
